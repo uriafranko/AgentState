@@ -9,7 +9,11 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use hf_hub::{api::sync::Api, Repo, RepoType};
+use std::collections::HashMap;
 use tokenizers::Tokenizer;
+
+/// Maximum number of embeddings to cache (LRU eviction when exceeded)
+const EMBEDDING_CACHE_SIZE: usize = 1000;
 
 /// The Brain handles all AI-related operations including embedding generation and intent classification
 pub struct Brain {
@@ -24,6 +28,10 @@ pub struct Brain {
     anchor_store: Tensor,
     /// Anchor vector representing "Query" action
     anchor_query: Tensor,
+    /// Cache for computed embeddings (text -> embedding vector as f32 array)
+    embedding_cache: HashMap<String, Vec<f32>>,
+    /// Order of cache insertions for LRU eviction
+    cache_order: Vec<String>,
 }
 
 /// The action the agent wants to perform
@@ -155,6 +163,8 @@ impl Brain {
             anchor_memory: placeholder.clone(),
             anchor_store: placeholder.clone(),
             anchor_query: placeholder,
+            embedding_cache: HashMap::new(),
+            cache_order: Vec::new(),
         };
 
         // 2. Initialize Anchor Vectors (Zero-Shot Classification Logic)
@@ -181,7 +191,34 @@ impl Brain {
     ///
     /// Uses mean pooling over all token embeddings followed by L2 normalization.
     /// The resulting vector is suitable for cosine similarity comparisons.
-    pub fn embed(&self, text: &str) -> Result<Tensor> {
+    /// Results are cached for performance.
+    pub fn embed(&mut self, text: &str) -> Result<Tensor> {
+        // Check cache first
+        if let Some(cached) = self.embedding_cache.get(text) {
+            return Ok(Tensor::new(cached.as_slice(), &self.device)?.unsqueeze(0)?);
+        }
+
+        // Compute embedding
+        let embedding = self.compute_embedding(text)?;
+
+        // Extract values for caching
+        let values: Vec<f32> = embedding.squeeze(0)?.to_vec1()?;
+
+        // Cache with LRU eviction
+        if self.cache_order.len() >= EMBEDDING_CACHE_SIZE {
+            if let Some(oldest) = self.cache_order.first().cloned() {
+                self.embedding_cache.remove(&oldest);
+                self.cache_order.remove(0);
+            }
+        }
+        self.embedding_cache.insert(text.to_string(), values);
+        self.cache_order.push(text.to_string());
+
+        Ok(embedding)
+    }
+
+    /// Internal: compute embedding without caching (used by embed())
+    fn compute_embedding(&self, text: &str) -> Result<Tensor> {
         // Tokenize input text
         let tokens = self
             .tokenizer
@@ -225,6 +262,17 @@ impl Brain {
         let normalized = mean_embeddings.broadcast_div(&norm)?;
 
         Ok(normalized)
+    }
+
+    /// Returns cache statistics (hits can be inferred by caller)
+    pub fn cache_size(&self) -> usize {
+        self.embedding_cache.len()
+    }
+
+    /// Clears the embedding cache
+    pub fn clear_cache(&mut self) {
+        self.embedding_cache.clear();
+        self.cache_order.clear();
     }
 
     /// Classifies the full intent of an input embedding vector
@@ -323,7 +371,7 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_embedding_shape() {
-        let brain = Brain::new().expect("Brain should initialize");
+        let mut brain = Brain::new().expect("Brain should initialize");
         let embedding = brain.embed("Hello world").expect("Embedding should succeed");
         let dims = embedding.dims();
         assert_eq!(dims, &[1, 384]);
@@ -332,7 +380,7 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_store_task_classification() {
-        let brain = Brain::new().expect("Brain should initialize");
+        let mut brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("Remind me to buy groceries tomorrow")
             .expect("Embedding should succeed");
@@ -344,7 +392,7 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_store_memory_classification() {
-        let brain = Brain::new().expect("Brain should initialize");
+        let mut brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("My favorite programming language is Rust")
             .expect("Embedding should succeed");
@@ -356,7 +404,7 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_query_classification() {
-        let brain = Brain::new().expect("Brain should initialize");
+        let mut brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("What is my favorite color?")
             .expect("Embedding should succeed");
@@ -367,7 +415,7 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_search_classification() {
-        let brain = Brain::new().expect("Brain should initialize");
+        let mut brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("Find all my tasks for today")
             .expect("Embedding should succeed");

@@ -345,12 +345,12 @@ impl AgentEngine {
     /// Explicitly query (bypasses action detection)
     ///
     /// Use when you know you want to search, not store.
-    pub fn search(&self, query: &str) -> Result<AgentResponse> {
+    pub fn search(&mut self, query: &str) -> Result<AgentResponse> {
         self.search_with_limit(query, 5)
     }
 
     /// Query with custom result limit
-    pub fn search_with_limit(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+    pub fn search_with_limit(&mut self, query: &str, limit: usize) -> Result<AgentResponse> {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
@@ -383,7 +383,7 @@ impl AgentEngine {
     }
 
     /// Query only tasks
-    pub fn search_tasks(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+    pub fn search_tasks(&mut self, query: &str, limit: usize) -> Result<AgentResponse> {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
@@ -416,7 +416,7 @@ impl AgentEngine {
     }
 
     /// Query only memories
-    pub fn search_memories(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+    pub fn search_memories(&mut self, query: &str, limit: usize) -> Result<AgentResponse> {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
@@ -487,7 +487,7 @@ impl AgentEngine {
     }
 
     /// Classify intent without storing (useful for debugging/preview)
-    pub fn classify(&self, text: &str) -> Result<Intent> {
+    pub fn classify(&mut self, text: &str) -> Result<Intent> {
         let vector = self.brain.embed(text)?;
         self.brain.classify(&vector)
     }
@@ -515,7 +515,7 @@ impl AgentEngine {
 
     /// Query information (old API - use `process()` or `search()` instead)
     #[deprecated(since = "0.2.0", note = "Use process() or search() instead")]
-    pub fn query(&self, question: &str) -> Result<Vec<String>> {
+    pub fn query(&mut self, question: &str) -> Result<Vec<String>> {
         let response = self.search(question)?;
         match response {
             AgentResponse::QueryResult { results, .. } => Ok(results),

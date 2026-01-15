@@ -363,7 +363,7 @@ fn handle_clear(engine: &mut AgentEngine) {
     }
 }
 
-fn handle_classify(engine: &AgentEngine, text: &str) {
+fn handle_classify(engine: &mut AgentEngine, text: &str) {
     match engine.classify(text) {
         Ok(intent) => {
             let action = match intent.action {
