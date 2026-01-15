@@ -34,12 +34,15 @@
 //! ```
 
 mod brain;
+pub mod metrics;
 mod storage;
 
 pub use brain::{Action, Brain, DataType, Intent};
+pub use metrics::{Metrics, Operation, OperationStats};
 pub use storage::{KnowledgeItem, Storage};
 
 use anyhow::{Context, Result};
+use std::time::Instant;
 
 /// Response from the AgentEngine after processing a request
 #[derive(Debug, Clone)]
@@ -52,6 +55,8 @@ pub enum AgentResponse {
         data_type: DataType,
         /// The original content that was stored
         content: String,
+        /// Latency of this operation in milliseconds
+        latency_ms: f64,
     },
     /// Query returned results
     QueryResult {
@@ -61,11 +66,15 @@ pub enum AgentResponse {
         data_type: Option<DataType>,
         /// Number of results returned
         count: usize,
+        /// Latency of this operation in milliseconds
+        latency_ms: f64,
     },
     /// Query returned no results
     NotFound {
         /// The original query
         query: String,
+        /// Latency of this operation in milliseconds
+        latency_ms: f64,
     },
 }
 
@@ -78,6 +87,15 @@ impl AgentResponse {
     /// Returns true if this is a query with results
     pub fn has_results(&self) -> bool {
         matches!(self, AgentResponse::QueryResult { count, .. } if *count > 0)
+    }
+
+    /// Get the latency of this operation in milliseconds
+    pub fn latency_ms(&self) -> f64 {
+        match self {
+            AgentResponse::Stored { latency_ms, .. } => *latency_ms,
+            AgentResponse::QueryResult { latency_ms, .. } => *latency_ms,
+            AgentResponse::NotFound { latency_ms, .. } => *latency_ms,
+        }
     }
 
     /// Converts the response to a simple string for agent consumption
@@ -93,7 +111,7 @@ impl AgentResponse {
                     results.join("\n")
                 }
             }
-            AgentResponse::NotFound { query } => {
+            AgentResponse::NotFound { query, .. } => {
                 format!("No information found for: {}", query)
             }
         }
@@ -107,6 +125,7 @@ impl AgentResponse {
 pub struct AgentEngine {
     brain: Brain,
     storage: Storage,
+    metrics: Metrics,
 }
 
 impl AgentEngine {
@@ -119,12 +138,40 @@ impl AgentEngine {
     pub fn new(db_path: &str) -> Result<Self> {
         let brain = Brain::new().context("Failed to initialize Brain")?;
         let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
-        Ok(Self { brain, storage })
+        let metrics = Metrics::new();
+        Ok(Self { brain, storage, metrics })
     }
 
     /// Creates an AgentEngine with an in-memory database (useful for testing)
     pub fn new_in_memory() -> Result<Self> {
         Self::new(":memory:")
+    }
+
+    /// Creates an AgentEngine with metrics disabled
+    pub fn new_without_metrics(db_path: &str) -> Result<Self> {
+        let brain = Brain::new().context("Failed to initialize Brain")?;
+        let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
+        let metrics = Metrics::disabled();
+        Ok(Self { brain, storage, metrics })
+    }
+
+    // =========================================================================
+    // METRICS API
+    // =========================================================================
+
+    /// Get the metrics collector
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// Get a summary of all collected metrics
+    pub fn metrics_summary(&self) -> String {
+        self.metrics.summary()
+    }
+
+    /// Reset all collected metrics
+    pub fn reset_metrics(&self) {
+        self.metrics.reset();
     }
 
     // =========================================================================
@@ -151,17 +198,23 @@ impl AgentEngine {
     /// let response = engine.process("What is my favorite food?").unwrap();
     /// ```
     pub fn process(&mut self, input: &str) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
         // 1. Generate embedding for the input
+        let embed_start = Instant::now();
         let vector_tensor = self
             .brain
             .embed(input)
             .context("Failed to generate embedding")?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
 
         // 2. Classify the full intent (action + data type)
+        let classify_start = Instant::now();
         let intent = self
             .brain
             .classify(&vector_tensor)
             .context("Failed to classify intent")?;
+        self.metrics.record(Operation::Classify, classify_start.elapsed());
 
         // 3. Convert tensor to vector for storage/search
         let vector_flat: Vec<f32> = vector_tensor
@@ -170,41 +223,53 @@ impl AgentEngine {
             .context("Failed to flatten embedding")?;
 
         // 4. Route based on detected action
-        match intent.action {
+        let response = match intent.action {
             Action::Store => {
                 let category = match intent.data_type {
                     DataType::Task => "task",
                     DataType::Memory => "memory",
                 };
 
+                let db_start = Instant::now();
                 let id = self
                     .storage
                     .save(input, category, &vector_flat)
                     .context("Failed to save")?;
+                self.metrics.record(Operation::DbSave, db_start.elapsed());
 
-                Ok(AgentResponse::Stored {
+                let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+                AgentResponse::Stored {
                     id,
                     data_type: intent.data_type,
                     content: input.to_string(),
-                })
+                    latency_ms,
+                }
             }
             Action::Query => {
+                let db_start = Instant::now();
                 let results = self.storage.search(&vector_flat, 5)?;
+                self.metrics.record(Operation::DbSearch, db_start.elapsed());
 
+                let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
                 if results.is_empty() {
-                    Ok(AgentResponse::NotFound {
+                    AgentResponse::NotFound {
                         query: input.to_string(),
-                    })
+                        latency_ms,
+                    }
                 } else {
                     let count = results.len();
-                    Ok(AgentResponse::QueryResult {
+                    AgentResponse::QueryResult {
                         results,
                         data_type: None,
                         count,
-                    })
+                        latency_ms,
+                    }
                 }
             }
-        }
+        };
+
+        self.metrics.record(Operation::Process, total_start.elapsed());
+        Ok(response)
     }
 
     // =========================================================================
@@ -215,8 +280,16 @@ impl AgentEngine {
     ///
     /// Use when you know you want to store, not query.
     pub fn store(&mut self, content: &str) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
+        let embed_start = Instant::now();
         let vector_tensor = self.brain.embed(content)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
+        let classify_start = Instant::now();
         let data_type = self.brain.classify_data_type(&vector_tensor)?;
+        self.metrics.record(Operation::Classify, classify_start.elapsed());
+
         let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let category = match data_type {
@@ -224,18 +297,29 @@ impl AgentEngine {
             DataType::Memory => "memory",
         };
 
+        let db_start = Instant::now();
         let id = self.storage.save(content, category, &vector_flat)?;
+        self.metrics.record(Operation::DbSave, db_start.elapsed());
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Store, total_start.elapsed());
 
         Ok(AgentResponse::Stored {
             id,
             data_type,
             content: content.to_string(),
+            latency_ms,
         })
     }
 
     /// Explicitly store as a specific type
     pub fn store_as(&mut self, content: &str, data_type: DataType) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
+        let embed_start = Instant::now();
         let vector_tensor = self.brain.embed(content)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
         let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let category = match data_type {
@@ -243,12 +327,18 @@ impl AgentEngine {
             DataType::Memory => "memory",
         };
 
+        let db_start = Instant::now();
         let id = self.storage.save(content, category, &vector_flat)?;
+        self.metrics.record(Operation::DbSave, db_start.elapsed());
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Store, total_start.elapsed());
 
         Ok(AgentResponse::Stored {
             id,
             data_type,
             content: content.to_string(),
+            latency_ms,
         })
     }
 
@@ -261,13 +351,25 @@ impl AgentEngine {
 
     /// Query with custom result limit
     pub fn search_with_limit(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
+        let embed_start = Instant::now();
         let vector_tensor = self.brain.embed(query)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
         let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
+
+        let db_start = Instant::now();
         let results = self.storage.search(&vector_flat, limit)?;
+        self.metrics.record(Operation::DbSearch, db_start.elapsed());
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Search, total_start.elapsed());
 
         if results.is_empty() {
             Ok(AgentResponse::NotFound {
                 query: query.to_string(),
+                latency_ms,
             })
         } else {
             let count = results.len();
@@ -275,19 +377,32 @@ impl AgentEngine {
                 results,
                 data_type: None,
                 count,
+                latency_ms,
             })
         }
     }
 
     /// Query only tasks
     pub fn search_tasks(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
+        let embed_start = Instant::now();
         let vector_tensor = self.brain.embed(query)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
         let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
+
+        let db_start = Instant::now();
         let results = self.storage.search_by_category(&vector_flat, "task", limit)?;
+        self.metrics.record(Operation::DbSearch, db_start.elapsed());
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Search, total_start.elapsed());
 
         if results.is_empty() {
             Ok(AgentResponse::NotFound {
                 query: query.to_string(),
+                latency_ms,
             })
         } else {
             let count = results.len();
@@ -295,19 +410,32 @@ impl AgentEngine {
                 results,
                 data_type: Some(DataType::Task),
                 count,
+                latency_ms,
             })
         }
     }
 
     /// Query only memories
     pub fn search_memories(&self, query: &str, limit: usize) -> Result<AgentResponse> {
+        let total_start = Instant::now();
+
+        let embed_start = Instant::now();
         let vector_tensor = self.brain.embed(query)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
         let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
+
+        let db_start = Instant::now();
         let results = self.storage.search_by_category(&vector_flat, "memory", limit)?;
+        self.metrics.record(Operation::DbSearch, db_start.elapsed());
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Search, total_start.elapsed());
 
         if results.is_empty() {
             Ok(AgentResponse::NotFound {
                 query: query.to_string(),
+                latency_ms,
             })
         } else {
             let count = results.len();
@@ -315,6 +443,7 @@ impl AgentEngine {
                 results,
                 data_type: Some(DataType::Memory),
                 count,
+                latency_ms,
             })
         }
     }
@@ -419,6 +548,7 @@ mod tests {
             .expect("Process should succeed");
 
         assert!(response.is_stored());
+        assert!(response.latency_ms() > 0.0);
         if let AgentResponse::Stored { data_type, .. } = response {
             assert_eq!(data_type, DataType::Memory);
         }
@@ -436,6 +566,7 @@ mod tests {
         let response = engine.process("What is my name?").expect("Process should succeed");
 
         assert!(response.has_results());
+        assert!(response.latency_ms() > 0.0);
     }
 
     #[test]
@@ -457,5 +588,25 @@ mod tests {
             }
             _ => panic!("Expected QueryResult"),
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_metrics_collection() {
+        let mut engine = AgentEngine::new_in_memory().expect("Engine should initialize");
+
+        engine.process("My favorite color is blue").unwrap();
+        engine.process("What is my favorite color?").unwrap();
+
+        let stats = engine.metrics().get_all_stats();
+
+        // Should have recorded embed, classify, and process operations
+        assert!(stats.contains_key(&Operation::Embed));
+        assert!(stats.contains_key(&Operation::Classify));
+        assert!(stats.contains_key(&Operation::Process));
+
+        // Embed should have been called twice
+        let embed_stats = stats.get(&Operation::Embed).unwrap();
+        assert_eq!(embed_stats.count, 2);
     }
 }

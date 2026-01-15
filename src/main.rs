@@ -6,6 +6,9 @@
 use agent_brain::{AgentEngine, AgentResponse, DataType};
 use std::io::{self, BufRead, Write};
 
+/// Whether to show latency for each operation
+static mut SHOW_LATENCY: bool = true;
+
 fn main() {
     println!("AgentState - Semantic State Engine for AI Agents");
     println!("=================================================");
@@ -44,7 +47,7 @@ fn main() {
     println!("  'What is my favorite color?' -> Queries and returns results");
     println!("  'Who should I call?'         -> Queries and returns results");
     println!();
-    println!("Commands: stats, tasks, memories, clear, classify <text>, quit");
+    println!("Commands: stats, tasks, memories, metrics, latency, clear, quit");
     println!("-----------------------------------------------------------");
     println!();
 
@@ -75,12 +78,12 @@ fn run_demo(engine: &mut AgentEngine) {
     for example in &store_examples {
         match engine.process(example) {
             Ok(response) => {
-                if let AgentResponse::Stored { data_type, .. } = &response {
+                if let AgentResponse::Stored { data_type, latency_ms, .. } = &response {
                     let type_str = match data_type {
                         DataType::Task => "TASK",
                         DataType::Memory => "MEMORY",
                     };
-                    println!("   '{}'\n   -> Stored as {}", example, type_str);
+                    println!("   '{}'\n   -> Stored as {} ({:.1}ms)", example, type_str, latency_ms);
                 }
             }
             Err(e) => println!("   Error: {}", e),
@@ -104,14 +107,14 @@ fn run_demo(engine: &mut AgentEngine) {
             Ok(response) => {
                 println!("   Query: '{}'", example);
                 match &response {
-                    AgentResponse::QueryResult { results, count, .. } => {
-                        println!("   Found {} result(s):", count);
+                    AgentResponse::QueryResult { results, count, latency_ms, .. } => {
+                        println!("   Found {} result(s) ({:.1}ms):", count, latency_ms);
                         for (i, r) in results.iter().take(2).enumerate() {
                             println!("     {}. {}", i + 1, r);
                         }
                     }
-                    AgentResponse::NotFound { .. } => {
-                        println!("   No results found");
+                    AgentResponse::NotFound { latency_ms, .. } => {
+                        println!("   No results found ({:.1}ms)", latency_ms);
                     }
                     _ => {}
                 }
@@ -141,6 +144,12 @@ fn run_demo(engine: &mut AgentEngine) {
         println!("   Tasks: {}", tasks);
         println!("   Memories: {}", memories);
     }
+    println!();
+
+    // Latency metrics
+    println!("5. Latency Metrics (from demo operations):");
+    println!();
+    println!("{}", engine.metrics_summary());
     println!();
 
     println!("Demo complete!");
@@ -192,6 +201,25 @@ fn interactive_mode(engine: &mut AgentEngine) {
             continue;
         }
 
+        if lower == "metrics" {
+            println!("{}", engine.metrics_summary());
+            continue;
+        }
+
+        if lower == "reset-metrics" {
+            engine.reset_metrics();
+            println!("Metrics reset.");
+            continue;
+        }
+
+        if lower == "latency" {
+            unsafe {
+                SHOW_LATENCY = !SHOW_LATENCY;
+                println!("Latency display: {}", if SHOW_LATENCY { "ON" } else { "OFF" });
+            }
+            continue;
+        }
+
         if lower == "help" {
             print_help();
             continue;
@@ -222,35 +250,51 @@ fn interactive_mode(engine: &mut AgentEngine) {
 }
 
 fn print_response(response: &AgentResponse) {
+    let show_latency = unsafe { SHOW_LATENCY };
+
     match response {
         AgentResponse::Stored {
             id,
             data_type,
             content,
+            latency_ms,
         } => {
             let type_str = match data_type {
                 DataType::Task => "TASK",
                 DataType::Memory => "MEMORY",
             };
-            println!("Stored [{}] as {} (id: {})", content, type_str, id);
+            if show_latency {
+                println!("Stored [{}] as {} (id: {}) [{:.1}ms]", content, type_str, id, latency_ms);
+            } else {
+                println!("Stored [{}] as {} (id: {})", content, type_str, id);
+            }
         }
         AgentResponse::QueryResult {
             results,
             count,
             data_type,
+            latency_ms,
         } => {
             let filter = match data_type {
                 Some(DataType::Task) => " (tasks only)",
                 Some(DataType::Memory) => " (memories only)",
                 None => "",
             };
-            println!("Found {} result(s){}:", count, filter);
+            if show_latency {
+                println!("Found {} result(s){} [{:.1}ms]:", count, filter, latency_ms);
+            } else {
+                println!("Found {} result(s){}:", count, filter);
+            }
             for (i, result) in results.iter().enumerate() {
                 println!("  {}. {}", i + 1, result);
             }
         }
-        AgentResponse::NotFound { query } => {
-            println!("No results found for: '{}'", query);
+        AgentResponse::NotFound { query, latency_ms } => {
+            if show_latency {
+                println!("No results found for: '{}' [{:.1}ms]", query, latency_ms);
+            } else {
+                println!("No results found for: '{}'", query);
+            }
         }
     }
 }
@@ -366,6 +410,9 @@ fn print_help() {
     println!("  stats           - Show statistics");
     println!("  tasks           - List all tasks");
     println!("  memories        - List all memories");
+    println!("  metrics         - Show latency metrics summary");
+    println!("  reset-metrics   - Reset all latency metrics");
+    println!("  latency         - Toggle latency display on/off");
     println!("  classify <text> - Preview classification without storing");
     println!("  delete <id>     - Delete item by ID");
     println!("  clear           - Clear all data");
