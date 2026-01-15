@@ -28,3 +28,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "agent-brain"
 path = "src/main.rs"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
