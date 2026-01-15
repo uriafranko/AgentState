@@ -11,9 +11,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
+anyhow = "1.0"
 
 # Link to the core Rust library
-# agent-brain = { path = "../agent-state-rs" }
+agent-brain = { path = "../agent-state-rs" }
 
 [profile.release]
 opt-level = 3
