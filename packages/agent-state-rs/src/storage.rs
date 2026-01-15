@@ -230,7 +230,7 @@ impl Storage {
     /// # Arguments
     /// * `text` - The content to store
     /// * `category` - One of: "task", "memory", "preference", "relationship", "event"
-    /// * `vector` - The 384-dimensional embedding vector
+    /// * `vector` - The embedding vector (dimension depends on model: 384 for small models, 768 for base models)
     pub fn save(&mut self, text: &str, category: &str, vector: &[f32]) -> Result<i64> {
         let tx = self.conn.transaction()?;
         let row_id = Self::save_in_transaction(&tx, text, category, vector)?;

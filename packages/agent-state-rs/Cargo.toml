@@ -1,14 +1,28 @@
 [package]
 name = "agent-brain"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "AgentState - A semantic state engine for AI agents with unified intent-based API"
 
+[features]
+default = ["candle-backend"]
+# Candle backend (default) - uses HuggingFace Candle for inference
+candle-backend = ["candle-core", "candle-nn", "candle-transformers"]
+# ONNX Runtime backend - faster inference, better CPU optimization
+onnx-backend = ["ort"]
+# Enable both backends for runtime selection
+all-backends = ["candle-backend", "onnx-backend"]
+
 [dependencies]
-# The AI Stack (HuggingFace Candle)
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
+# The AI Stack - Candle (optional, default)
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+
+# The AI Stack - ONNX Runtime (optional, for better performance)
+ort = { version = "2.0.0-rc.11", optional = true }
+
+# Shared AI dependencies
 tokenizers = "0.20"
 hf-hub = "0.3"
 
@@ -20,6 +34,7 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bytemuck = { version = "1.14", features = ["derive"] }
+ndarray = "0.16"
 
 [lib]
 name = "agent_brain"

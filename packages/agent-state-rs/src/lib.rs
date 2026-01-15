@@ -38,7 +38,7 @@ pub mod federation;
 pub mod metrics;
 mod storage;
 
-pub use brain::{Action, Brain, DataType, Intent};
+pub use brain::{Action, Backend, Brain, BrainConfig, DataType, EmbeddingModel, Intent};
 pub use federation::{FederatedEngine, FederationConfig};
 pub use metrics::{Metrics, Operation, OperationStats};
 pub use storage::{KnowledgeItem, Storage, TimeFilter};
@@ -161,14 +161,30 @@ pub struct AgentEngine {
 }
 
 impl AgentEngine {
-    /// Creates a new AgentEngine instance
+    /// Creates a new AgentEngine instance with default configuration
     ///
-    /// Downloads and caches the MiniLM model on first run (~90MB).
+    /// Uses BGE-Small model (best accuracy for 384 dimensions) with the best available backend.
+    /// Downloads and caches the model on first run (~90MB).
     ///
     /// # Arguments
     /// * `db_path` - Path to the SQLite database file
     pub fn new(db_path: &str) -> Result<Self> {
-        let brain = Brain::new().context("Failed to initialize Brain")?;
+        Self::with_config(db_path, BrainConfig::default())
+    }
+
+    /// Creates a new AgentEngine with custom Brain configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use agent_brain::{AgentEngine, BrainConfig, EmbeddingModel};
+    ///
+    /// // Use the most accurate model (768 dimensions)
+    /// let config = BrainConfig::accurate();
+    /// let engine = AgentEngine::with_config("agent.db", config)?;
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn with_config(db_path: &str, config: BrainConfig) -> Result<Self> {
+        let brain = Brain::with_config(config).context("Failed to initialize Brain")?;
         let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
         let metrics = Metrics::new();
         Ok(Self { brain, storage, metrics })
@@ -177,6 +193,16 @@ impl AgentEngine {
     /// Creates an AgentEngine with an in-memory database (useful for testing)
     pub fn new_in_memory() -> Result<Self> {
         Self::new(":memory:")
+    }
+
+    /// Creates an AgentEngine optimized for speed (MiniLM-L6)
+    pub fn new_fast(db_path: &str) -> Result<Self> {
+        Self::with_config(db_path, BrainConfig::fast())
+    }
+
+    /// Creates an AgentEngine optimized for accuracy (BGE-Base, 768 dims)
+    pub fn new_accurate(db_path: &str) -> Result<Self> {
+        Self::with_config(db_path, BrainConfig::accurate())
     }
 
     /// Creates an AgentEngine with metrics disabled
@@ -208,6 +234,21 @@ impl AgentEngine {
     /// Returns whether this engine is running in mock mode
     pub fn is_mock(&self) -> bool {
         self.brain.is_mock()
+    }
+
+    /// Returns the configured embedding model
+    pub fn model(&self) -> EmbeddingModel {
+        self.brain.model()
+    }
+
+    /// Returns the configured backend
+    pub fn backend(&self) -> Backend {
+        self.brain.backend()
+    }
+
+    /// Returns the embedding dimension for the configured model
+    pub fn embedding_dim(&self) -> usize {
+        self.brain.embedding_dim()
     }
 
     // =========================================================================
@@ -268,9 +309,9 @@ impl AgentEngine {
 
         // 1. Generate embedding for the input
         let embed_start = Instant::now();
-        let vector_tensor = self
+        let vector_flat = self
             .brain
-            .embed(input)
+            .embed_to_vec(input)
             .context("Failed to generate embedding")?;
         self.metrics.record(Operation::Embed, embed_start.elapsed());
 
@@ -278,7 +319,7 @@ impl AgentEngine {
         let classify_start = Instant::now();
         let intent = self
             .brain
-            .classify(&vector_tensor)
+            .classify_vec(&vector_flat)
             .context("Failed to classify intent")?;
         self.metrics.record(Operation::Classify, classify_start.elapsed());
 
@@ -298,13 +339,7 @@ impl AgentEngine {
             });
         }
 
-        // 4. Convert tensor to vector for storage/search
-        let vector_flat: Vec<f32> = vector_tensor
-            .flatten_all()?
-            .to_vec1()
-            .context("Failed to flatten embedding")?;
-
-        // 5. Route based on detected action
+        // 4. Route based on detected action
         let response = match intent.action {
             Action::Store => {
                 let category = intent.data_type.as_category();
@@ -373,14 +408,12 @@ impl AgentEngine {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
-        let vector_tensor = self.brain.embed(content)?;
+        let vector_flat = self.brain.embed_to_vec(content)?;
         self.metrics.record(Operation::Embed, embed_start.elapsed());
 
         let classify_start = Instant::now();
-        let data_type = self.brain.classify_data_type(&vector_tensor)?;
+        let data_type = self.brain.classify_data_type_vec(&vector_flat)?;
         self.metrics.record(Operation::Classify, classify_start.elapsed());
-
-        let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let category = data_type.as_category();
 
@@ -404,10 +437,8 @@ impl AgentEngine {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
-        let vector_tensor = self.brain.embed(content)?;
+        let vector_flat = self.brain.embed_to_vec(content)?;
         self.metrics.record(Operation::Embed, embed_start.elapsed());
-
-        let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let category = data_type.as_category();
 
@@ -454,9 +485,7 @@ impl AgentEngine {
         // Classify and prepare batch items
         let mut items = Vec::with_capacity(contents.len());
         for (content, embedding) in contents.iter().zip(embeddings.iter()) {
-            let tensor = candle_core::Tensor::new(embedding.as_slice(), &candle_core::Device::Cpu)?
-                .unsqueeze(0)?;
-            let data_type = self.brain.classify_data_type(&tensor)?;
+            let data_type = self.brain.classify_data_type_vec(embedding)?;
             items.push((*content, data_type.as_category(), embedding.as_slice()));
         }
 
@@ -507,10 +536,8 @@ impl AgentEngine {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
-        let vector_tensor = self.brain.embed(query)?;
+        let vector_flat = self.brain.embed_to_vec(query)?;
         self.metrics.record(Operation::Embed, embed_start.elapsed());
-
-        let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let db_start = Instant::now();
         let results = self.storage.search(&vector_flat, limit)?;
@@ -584,10 +611,8 @@ impl AgentEngine {
         let total_start = Instant::now();
 
         let embed_start = Instant::now();
-        let vector_tensor = self.brain.embed(query)?;
+        let vector_flat = self.brain.embed_to_vec(query)?;
         self.metrics.record(Operation::Embed, embed_start.elapsed());
-
-        let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
 
         let db_start = Instant::now();
         let category = data_type.map(|dt| dt.as_category());
@@ -680,8 +705,7 @@ impl AgentEngine {
 
     /// Classify intent without storing (useful for debugging/preview)
     pub fn classify(&mut self, text: &str) -> Result<Intent> {
-        let vector = self.brain.embed(text)?;
-        self.brain.classify(&vector)
+        self.brain.classify_text(text)
     }
 
     // =========================================================================
