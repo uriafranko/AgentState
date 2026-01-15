@@ -1,7 +1,7 @@
 //! Intelligence Layer - Handles AI model loading, embedding generation, and intent classification
 //!
 //! This module implements zero-shot intent routing using a MiniLM sentence transformer model.
-//! It classifies input text as either a "Task" (action item) or "Memory" (contextual information)
+//! It classifies input text by action (Store vs Query) and by data type (Task vs Memory)
 //! by comparing embeddings against pre-computed anchor vectors.
 
 use anyhow::{Context, Result};
@@ -16,19 +16,41 @@ pub struct Brain {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
-    /// Anchor vector representing "Task" intent
+    /// Anchor vector representing "Task" data type
     anchor_task: Tensor,
-    /// Anchor vector representing "Memory" intent
+    /// Anchor vector representing "Memory" data type
     anchor_memory: Tensor,
+    /// Anchor vector representing "Store" action
+    anchor_store: Tensor,
+    /// Anchor vector representing "Query" action
+    anchor_query: Tensor,
 }
 
-/// Represents the classified intent of user input
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Intent {
+/// The action the agent wants to perform
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Store information (save, remember, add, note)
+    Store,
+    /// Query/retrieve information (find, search, what is, who is)
+    Query,
+}
+
+/// The type of data being stored or queried
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
     /// Action items, reminders, todos - things that need to be done
     Task,
     /// Facts, preferences, context - information to remember
     Memory,
+}
+
+/// Full intent classification result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Intent {
+    /// What action to perform (store or query)
+    pub action: Action,
+    /// What type of data this relates to
+    pub data_type: DataType,
 }
 
 impl Brain {
@@ -82,16 +104,26 @@ impl Brain {
             tokenizer,
             device,
             anchor_task: placeholder.clone(),
-            anchor_memory: placeholder,
+            anchor_memory: placeholder.clone(),
+            anchor_store: placeholder.clone(),
+            anchor_query: placeholder,
         };
 
         // 2. Initialize Anchor Vectors (Zero-Shot Classification Logic)
-        // These anchor phrases define what "Task" and "Memory" look like in embedding space
+        // Data type anchors: what kind of information is this?
         brain.anchor_task = brain.embed(
-            "I need to do this, add to todo list, remind me, deadline, schedule, action item",
+            "action item, todo, remind me to, deadline, schedule, need to do, task, appointment",
         )?;
         brain.anchor_memory = brain.embed(
-            "This is a fact, user preference, historical context, background info, remember this",
+            "fact, preference, information, context, background, remember that, note, detail about",
+        )?;
+
+        // Action anchors: what does the agent want to do?
+        brain.anchor_store = brain.embed(
+            "save this, remember, store, add, note that, record, keep track of, my name is, I like",
+        )?;
+        brain.anchor_query = brain.embed(
+            "what is, who is, find, search, look up, tell me about, retrieve, get, show me, list",
         )?;
 
         Ok(brain)
@@ -147,12 +179,48 @@ impl Brain {
         Ok(normalized)
     }
 
-    /// Classifies the intent of an input embedding vector
+    /// Classifies the full intent of an input embedding vector
     ///
-    /// Uses cosine similarity (via dot product of normalized vectors) to compare
-    /// the input against pre-computed Task and Memory anchor vectors.
+    /// Returns both the action (Store/Query) and data type (Task/Memory)
+    /// by comparing against pre-computed anchor vectors.
     pub fn classify(&self, input_vec: &Tensor) -> Result<Intent> {
-        // Compute dot product (cosine similarity since vectors are normalized)
+        // Determine action: Store or Query?
+        let score_store = input_vec
+            .mul(&self.anchor_store)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+        let score_query = input_vec
+            .mul(&self.anchor_query)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+
+        let action = if score_query > score_store {
+            Action::Query
+        } else {
+            Action::Store
+        };
+
+        // Determine data type: Task or Memory?
+        let score_task = input_vec
+            .mul(&self.anchor_task)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+        let score_memory = input_vec
+            .mul(&self.anchor_memory)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+
+        let data_type = if score_task > score_memory {
+            DataType::Task
+        } else {
+            DataType::Memory
+        };
+
+        Ok(Intent { action, data_type })
+    }
+
+    /// Classifies only the data type (Task/Memory) - for backward compatibility
+    pub fn classify_data_type(&self, input_vec: &Tensor) -> Result<DataType> {
         let score_task = input_vec
             .mul(&self.anchor_task)?
             .sum_all()?
@@ -163,9 +231,27 @@ impl Brain {
             .to_scalar::<f32>()?;
 
         if score_task > score_memory {
-            Ok(Intent::Task)
+            Ok(DataType::Task)
         } else {
-            Ok(Intent::Memory)
+            Ok(DataType::Memory)
+        }
+    }
+
+    /// Classifies only the action (Store/Query)
+    pub fn classify_action(&self, input_vec: &Tensor) -> Result<Action> {
+        let score_store = input_vec
+            .mul(&self.anchor_store)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+        let score_query = input_vec
+            .mul(&self.anchor_query)?
+            .sum_all()?
+            .to_scalar::<f32>()?;
+
+        if score_query > score_store {
+            Ok(Action::Query)
+        } else {
+            Ok(Action::Store)
         }
     }
 
@@ -197,23 +283,47 @@ mod tests {
 
     #[test]
     #[ignore] // Requires model download
-    fn test_task_classification() {
+    fn test_store_task_classification() {
         let brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("Remind me to buy groceries tomorrow")
             .expect("Embedding should succeed");
         let intent = brain.classify(&embedding).expect("Classification should succeed");
-        assert_eq!(intent, Intent::Task);
+        assert_eq!(intent.action, Action::Store);
+        assert_eq!(intent.data_type, DataType::Task);
     }
 
     #[test]
     #[ignore] // Requires model download
-    fn test_memory_classification() {
+    fn test_store_memory_classification() {
         let brain = Brain::new().expect("Brain should initialize");
         let embedding = brain
             .embed("My favorite programming language is Rust")
             .expect("Embedding should succeed");
         let intent = brain.classify(&embedding).expect("Classification should succeed");
-        assert_eq!(intent, Intent::Memory);
+        assert_eq!(intent.action, Action::Store);
+        assert_eq!(intent.data_type, DataType::Memory);
+    }
+
+    #[test]
+    #[ignore] // Requires model download
+    fn test_query_classification() {
+        let brain = Brain::new().expect("Brain should initialize");
+        let embedding = brain
+            .embed("What is my favorite color?")
+            .expect("Embedding should succeed");
+        let intent = brain.classify(&embedding).expect("Classification should succeed");
+        assert_eq!(intent.action, Action::Query);
+    }
+
+    #[test]
+    #[ignore] // Requires model download
+    fn test_search_classification() {
+        let brain = Brain::new().expect("Brain should initialize");
+        let embedding = brain
+            .embed("Find all my tasks for today")
+            .expect("Embedding should succeed");
+        let intent = brain.classify(&embedding).expect("Classification should succeed");
+        assert_eq!(intent.action, Action::Query);
     }
 }

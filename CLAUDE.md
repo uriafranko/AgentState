@@ -2,6 +2,31 @@
 
 This document contains guidelines for AI assistants (Claude) working on this codebase.
 
+## Project Vision
+
+AgentState is a **Semantic State Engine** for AI agents. The key principle is:
+
+> **One API to handle everything** - agents just express intent naturally, the engine figures out the rest.
+
+### Core Concept
+
+```rust
+// Agents don't need to specify "store" vs "query" - just talk naturally
+engine.process("My favorite color is blue");      // Auto-detected as STORE + MEMORY
+engine.process("Remind me to call John");         // Auto-detected as STORE + TASK
+engine.process("What is my favorite color?");     // Auto-detected as QUERY
+engine.process("Who should I call?");             // Auto-detected as QUERY
+```
+
+### Response Format
+
+The `AgentResponse` enum provides structured feedback:
+- `Stored { id, data_type, content }` - Data was saved
+- `QueryResult { results, count, data_type }` - Query returned matches
+- `NotFound { query }` - No results found
+
+Use `response.to_agent_string()` for simple text output.
+
 ## Testing Requirements
 
 ### Always Run Tests After Significant Changes
@@ -83,10 +108,10 @@ cargo build --release
 
 ```
 src/
-├── brain.rs     # AI model loading and inference (MiniLM)
+├── brain.rs     # AI model loading, embeddings, intent classification
 ├── storage.rs   # SQLite database with vector storage
-├── lib.rs       # Public API (AgentEngine)
-└── main.rs      # CLI demo/test runner
+├── lib.rs       # Public API (AgentEngine, AgentResponse)
+└── main.rs      # CLI demo/interactive mode
 
 tests/
 └── storage_tests.rs  # Comprehensive DB tests
@@ -94,9 +119,33 @@ tests/
 
 ### Key Components
 
-- **Brain**: Loads MiniLM model, generates 384-dim embeddings, classifies intent
-- **Storage**: SQLite with blob vector storage, cosine similarity search
-- **AgentEngine**: Combines Brain + Storage, provides clean API
+- **Brain**:
+  - Loads MiniLM model (384-dim embeddings)
+  - Classifies **Action** (Store vs Query)
+  - Classifies **DataType** (Task vs Memory)
+  - Uses zero-shot classification via anchor vectors
+
+- **Storage**:
+  - SQLite with blob vector storage
+  - Cosine similarity search
+  - Category-filtered queries
+
+- **AgentEngine**:
+  - `process()` - The unified API (auto-routes by intent)
+  - `store()` / `search()` - Explicit methods when needed
+  - Returns `AgentResponse` for structured handling
+
+### Intent Classification
+
+The Brain uses anchor vectors to classify:
+1. **Action**: Is this a store request or query request?
+2. **DataType**: Is this a task (action item) or memory (fact)?
+
+```
+Input: "What is my name?"
+  -> Action: QUERY (matches "what is, who is, find, search...")
+  -> DataType: MEMORY (matches "fact, preference, information...")
+```
 
 ## Common Tasks
 

@@ -1,8 +1,8 @@
 [package]
 name = "agent-brain"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "A Rust-based AI agent core engine with local embeddings and vector search"
+description = "AgentState - A semantic state engine for AI agents with unified intent-based API"
 
 [dependencies]
 # The AI Stack (HuggingFace Candle)

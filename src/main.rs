@@ -1,20 +1,21 @@
-//! Agent Brain CLI - Test runner and interactive demo
+//! AgentState CLI - Demo and interactive testing
 //!
-//! This binary demonstrates the AgentEngine functionality with example inputs.
+//! This binary demonstrates the unified AgentEngine API where you just
+//! express intent naturally and the engine figures out what to do.
 
-use agent_brain::AgentEngine;
+use agent_brain::{AgentEngine, AgentResponse, DataType};
 use std::io::{self, BufRead, Write};
 
 fn main() {
-    println!("Agent Brain - Rust Core Engine");
-    println!("================================");
+    println!("AgentState - Semantic State Engine for AI Agents");
+    println!("=================================================");
     println!();
 
     // Initialize the engine
     print!("Loading AI model (this may take a moment on first run)... ");
     io::stdout().flush().unwrap();
 
-    let mut engine = match AgentEngine::new("my_agent.db") {
+    let mut engine = match AgentEngine::new("agent_state.db") {
         Ok(e) => {
             println!("Done!");
             e
@@ -29,106 +30,116 @@ fn main() {
     println!("Engine loaded successfully!");
     println!();
 
-    // Run demo tests
+    // Run demo showing the unified API
     run_demo(&mut engine);
 
     // Interactive mode
     println!();
-    println!("-----------------------------------");
-    println!("Interactive Mode");
-    println!("Commands: add <text>, query <text>, tasks, memories, clear, quit");
-    println!("-----------------------------------");
+    println!("-----------------------------------------------------------");
+    println!("Interactive Mode - Just talk naturally!");
+    println!("-----------------------------------------------------------");
+    println!("Examples:");
+    println!("  'My favorite color is blue'  -> Stores as memory");
+    println!("  'Remind me to call John'     -> Stores as task");
+    println!("  'What is my favorite color?' -> Queries and returns results");
+    println!("  'Who should I call?'         -> Queries and returns results");
+    println!();
+    println!("Commands: stats, tasks, memories, clear, classify <text>, quit");
+    println!("-----------------------------------------------------------");
     println!();
 
     interactive_mode(&mut engine);
 }
 
 fn run_demo(engine: &mut AgentEngine) {
-    println!("Running Demo Tests");
-    println!("------------------");
+    println!("Demo: The Unified API");
+    println!("---------------------");
+    println!();
+    println!("AgentState uses ONE method (process) for everything.");
+    println!("Just express intent naturally - no need to specify store vs query.");
     println!();
 
-    // Test 1: Add a Task
-    println!("Test 1: Adding a task...");
-    match engine.add("Remind me to buy oat milk tomorrow") {
-        Ok(result) => {
-            println!("  Input:  'Remind me to buy oat milk tomorrow'");
-            println!("  Result: {}", result);
-            println!("  [Expected: processed_as_task]");
-        }
-        Err(e) => println!("  Error: {}", e),
-    }
+    // Demo 1: Store operations (detected automatically)
+    println!("1. Storing information (detected as STORE action):");
     println!();
 
-    // Test 2: Add a Memory
-    println!("Test 2: Adding a memory...");
-    match engine.add("My favorite color is blue") {
-        Ok(result) => {
-            println!("  Input:  'My favorite color is blue'");
-            println!("  Result: {}", result);
-            println!("  [Expected: processed_as_memory]");
-        }
-        Err(e) => println!("  Error: {}", e),
-    }
-    println!();
-
-    // Test 3: Add more examples
-    println!("Test 3: Adding more examples...");
-    let examples = [
-        "Schedule a meeting with John for Friday",
-        "The project deadline is March 15th",
+    let store_examples = [
+        "My name is Alice",
         "I prefer dark mode in applications",
-        "Call the dentist to reschedule appointment",
-        "My phone number is 555-1234",
-        "Don't forget to submit the report",
+        "John's phone number is 555-1234",
+        "Remind me to buy groceries tomorrow",
+        "Schedule a meeting with Bob on Friday",
+        "Call the dentist to reschedule",
     ];
 
-    for example in &examples {
-        match engine.add(example) {
-            Ok(result) => println!("  '{}' -> {}", example, result),
-            Err(e) => println!("  '{}' -> Error: {}", example, e),
-        }
-    }
-    println!();
-
-    // Test 4: Semantic Search
-    println!("Test 4: Semantic search...");
-    match engine.query("What should I buy?") {
-        Ok(results) => {
-            println!("  Query: 'What should I buy?'");
-            println!("  Results:");
-            for (i, result) in results.iter().enumerate() {
-                println!("    {}. {}", i + 1, result);
+    for example in &store_examples {
+        match engine.process(example) {
+            Ok(response) => {
+                if let AgentResponse::Stored { data_type, .. } = &response {
+                    let type_str = match data_type {
+                        DataType::Task => "TASK",
+                        DataType::Memory => "MEMORY",
+                    };
+                    println!("   '{}'\n   -> Stored as {}", example, type_str);
+                }
             }
-            println!("  [Expected: 'Remind me to buy oat milk tomorrow' should be in results]");
+            Err(e) => println!("   Error: {}", e),
         }
-        Err(e) => println!("  Error: {}", e),
     }
     println!();
 
-    // Test 5: Search by category
-    println!("Test 5: Search only tasks...");
-    match engine.query_category("appointments and meetings", "task", 3) {
-        Ok(results) => {
-            println!("  Query: 'appointments and meetings' (tasks only)");
-            println!("  Results:");
-            for (i, result) in results.iter().enumerate() {
-                println!("    {}. {}", i + 1, result);
+    // Demo 2: Query operations (detected automatically)
+    println!("2. Querying information (detected as QUERY action):");
+    println!();
+
+    let query_examples = [
+        "What is my name?",
+        "Who should I call?",
+        "What do I need to buy?",
+        "Tell me about John",
+    ];
+
+    for example in &query_examples {
+        match engine.process(example) {
+            Ok(response) => {
+                println!("   Query: '{}'", example);
+                match &response {
+                    AgentResponse::QueryResult { results, count, .. } => {
+                        println!("   Found {} result(s):", count);
+                        for (i, r) in results.iter().take(2).enumerate() {
+                            println!("     {}. {}", i + 1, r);
+                        }
+                    }
+                    AgentResponse::NotFound { .. } => {
+                        println!("   No results found");
+                    }
+                    _ => {}
+                }
             }
+            Err(e) => println!("   Error: {}", e),
         }
-        Err(e) => println!("  Error: {}", e),
+        println!();
     }
+
+    // Demo 3: Show the response can be used directly by an agent
+    println!("3. Response format for agents:");
     println!();
 
-    // Test 6: Stats
-    println!("Test 6: Statistics...");
-    match (engine.count(), engine.count_by_category("task"), engine.count_by_category("memory")) {
-        (Ok(total), Ok(tasks), Ok(memories)) => {
-            println!("  Total items: {}", total);
-            println!("  Tasks: {}", tasks);
-            println!("  Memories: {}", memories);
-        }
-        _ => println!("  Error getting stats"),
+    let response = engine.process("What preferences do I have?").unwrap();
+    println!("   response.to_agent_string():");
+    println!("   {}", response.to_agent_string());
+    println!();
+
+    // Stats
+    println!("4. Current state:");
+    if let (Ok(total), Ok(tasks), Ok(memories)) = (
+        engine.count(),
+        engine.count_by_type(DataType::Task),
+        engine.count_by_type(DataType::Memory),
+    ) {
+        println!("   Total items: {}", total);
+        println!("   Tasks: {}", tasks);
+        println!("   Memories: {}", memories);
     }
     println!();
 
@@ -153,132 +164,211 @@ fn interactive_mode(engine: &mut AgentEngine) {
             continue;
         }
 
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        let command = parts[0].to_lowercase();
+        // Check for special commands
+        let lower = line.to_lowercase();
 
-        match command.as_str() {
-            "quit" | "exit" | "q" => {
-                println!("Goodbye!");
-                break;
+        if lower == "quit" || lower == "exit" || lower == "q" {
+            println!("Goodbye!");
+            break;
+        }
+
+        if lower == "stats" {
+            print_stats(engine);
+            continue;
+        }
+
+        if lower == "tasks" {
+            print_tasks(engine);
+            continue;
+        }
+
+        if lower == "memories" {
+            print_memories(engine);
+            continue;
+        }
+
+        if lower == "clear" {
+            handle_clear(engine);
+            continue;
+        }
+
+        if lower == "help" {
+            print_help();
+            continue;
+        }
+
+        if lower.starts_with("classify ") {
+            let text = &line[9..];
+            handle_classify(engine, text);
+            continue;
+        }
+
+        if lower.starts_with("delete ") {
+            let id_str = &line[7..];
+            handle_delete(engine, id_str);
+            continue;
+        }
+
+        // Default: process as natural language
+        match engine.process(line) {
+            Ok(response) => {
+                print_response(&response);
             }
-            "add" => {
-                if parts.len() < 2 {
-                    println!("Usage: add <text>");
-                    continue;
-                }
-                match engine.add(parts[1]) {
-                    Ok(result) => println!("{}", result),
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
-            "query" | "search" => {
-                if parts.len() < 2 {
-                    println!("Usage: query <text>");
-                    continue;
-                }
-                match engine.query_with_scores(parts[1], 5) {
-                    Ok(results) => {
-                        if results.is_empty() {
-                            println!("No results found.");
-                        } else {
-                            for (i, (content, score)) in results.iter().enumerate() {
-                                println!("{}. [score: {:.3}] {}", i + 1, score, content);
-                            }
-                        }
-                    }
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
-            "classify" => {
-                if parts.len() < 2 {
-                    println!("Usage: classify <text>");
-                    continue;
-                }
-                match engine.classify(parts[1]) {
-                    Ok(intent) => println!("{:?}", intent),
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
-            "tasks" => match engine.get_tasks() {
-                Ok(tasks) => {
-                    if tasks.is_empty() {
-                        println!("No tasks stored.");
-                    } else {
-                        println!("Tasks ({}):", tasks.len());
-                        for task in &tasks {
-                            println!("  [{}] {} ({})", task.id, task.content, task.created_at);
-                        }
-                    }
-                }
-                Err(e) => println!("Error: {}", e),
-            },
-            "memories" => match engine.get_memories() {
-                Ok(memories) => {
-                    if memories.is_empty() {
-                        println!("No memories stored.");
-                    } else {
-                        println!("Memories ({}):", memories.len());
-                        for memory in &memories {
-                            println!("  [{}] {} ({})", memory.id, memory.content, memory.created_at);
-                        }
-                    }
-                }
-                Err(e) => println!("Error: {}", e),
-            },
-            "stats" => {
-                match (
-                    engine.count(),
-                    engine.count_by_category("task"),
-                    engine.count_by_category("memory"),
-                ) {
-                    (Ok(total), Ok(tasks), Ok(memories)) => {
-                        println!("Total: {}, Tasks: {}, Memories: {}", total, tasks, memories);
-                    }
-                    _ => println!("Error getting stats"),
-                }
-            }
-            "clear" => {
-                print!("Are you sure? (y/n): ");
-                stdout.flush().unwrap();
-                let mut confirm = String::new();
-                if stdin.lock().read_line(&mut confirm).is_ok() && confirm.trim().to_lowercase() == "y" {
-                    match engine.clear() {
-                        Ok(_) => println!("All data cleared."),
-                        Err(e) => println!("Error: {}", e),
-                    }
-                } else {
-                    println!("Cancelled.");
-                }
-            }
-            "delete" => {
-                if parts.len() < 2 {
-                    println!("Usage: delete <id>");
-                    continue;
-                }
-                match parts[1].parse::<i64>() {
-                    Ok(id) => match engine.delete(id) {
-                        Ok(true) => println!("Deleted item {}", id),
-                        Ok(false) => println!("Item {} not found", id),
-                        Err(e) => println!("Error: {}", e),
-                    },
-                    Err(_) => println!("Invalid ID"),
-                }
-            }
-            "help" => {
-                println!("Commands:");
-                println!("  add <text>      - Add text (auto-classified as task/memory)");
-                println!("  query <text>    - Search for similar content");
-                println!("  classify <text> - Preview classification without storing");
-                println!("  tasks           - List all tasks");
-                println!("  memories        - List all memories");
-                println!("  stats           - Show statistics");
-                println!("  delete <id>     - Delete item by ID");
-                println!("  clear           - Clear all data");
-                println!("  quit            - Exit");
-            }
-            _ => {
-                println!("Unknown command: '{}'. Type 'help' for available commands.", command);
+            Err(e) => {
+                println!("Error: {}", e);
             }
         }
     }
+}
+
+fn print_response(response: &AgentResponse) {
+    match response {
+        AgentResponse::Stored {
+            id,
+            data_type,
+            content,
+        } => {
+            let type_str = match data_type {
+                DataType::Task => "TASK",
+                DataType::Memory => "MEMORY",
+            };
+            println!("Stored [{}] as {} (id: {})", content, type_str, id);
+        }
+        AgentResponse::QueryResult {
+            results,
+            count,
+            data_type,
+        } => {
+            let filter = match data_type {
+                Some(DataType::Task) => " (tasks only)",
+                Some(DataType::Memory) => " (memories only)",
+                None => "",
+            };
+            println!("Found {} result(s){}:", count, filter);
+            for (i, result) in results.iter().enumerate() {
+                println!("  {}. {}", i + 1, result);
+            }
+        }
+        AgentResponse::NotFound { query } => {
+            println!("No results found for: '{}'", query);
+        }
+    }
+}
+
+fn print_stats(engine: &AgentEngine) {
+    match (
+        engine.count(),
+        engine.count_by_type(DataType::Task),
+        engine.count_by_type(DataType::Memory),
+    ) {
+        (Ok(total), Ok(tasks), Ok(memories)) => {
+            println!("Statistics:");
+            println!("  Total items: {}", total);
+            println!("  Tasks: {}", tasks);
+            println!("  Memories: {}", memories);
+        }
+        _ => println!("Error getting stats"),
+    }
+}
+
+fn print_tasks(engine: &AgentEngine) {
+    match engine.get_tasks() {
+        Ok(tasks) => {
+            if tasks.is_empty() {
+                println!("No tasks stored.");
+            } else {
+                println!("Tasks ({}):", tasks.len());
+                for task in &tasks {
+                    println!("  [{}] {}", task.id, task.content);
+                }
+            }
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+fn print_memories(engine: &AgentEngine) {
+    match engine.get_memories() {
+        Ok(memories) => {
+            if memories.is_empty() {
+                println!("No memories stored.");
+            } else {
+                println!("Memories ({}):", memories.len());
+                for memory in &memories {
+                    println!("  [{}] {}", memory.id, memory.content);
+                }
+            }
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+fn handle_clear(engine: &mut AgentEngine) {
+    print!("Are you sure you want to clear all data? (y/n): ");
+    io::stdout().flush().unwrap();
+
+    let stdin = io::stdin();
+    let mut confirm = String::new();
+    if stdin.lock().read_line(&mut confirm).is_ok() && confirm.trim().to_lowercase() == "y" {
+        match engine.clear() {
+            Ok(_) => println!("All data cleared."),
+            Err(e) => println!("Error: {}", e),
+        }
+    } else {
+        println!("Cancelled.");
+    }
+}
+
+fn handle_classify(engine: &AgentEngine, text: &str) {
+    match engine.classify(text) {
+        Ok(intent) => {
+            let action = match intent.action {
+                agent_brain::Action::Store => "STORE",
+                agent_brain::Action::Query => "QUERY",
+            };
+            let data_type = match intent.data_type {
+                DataType::Task => "TASK",
+                DataType::Memory => "MEMORY",
+            };
+            println!("Intent: {} as {}", action, data_type);
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+fn handle_delete(engine: &mut AgentEngine, id_str: &str) {
+    match id_str.parse::<i64>() {
+        Ok(id) => match engine.delete(id) {
+            Ok(true) => println!("Deleted item {}", id),
+            Ok(false) => println!("Item {} not found", id),
+            Err(e) => println!("Error: {}", e),
+        },
+        Err(_) => println!("Invalid ID: {}", id_str),
+    }
+}
+
+fn print_help() {
+    println!("AgentState - Natural Language State Engine");
+    println!();
+    println!("Just type naturally! The engine automatically detects your intent.");
+    println!();
+    println!("Store examples:");
+    println!("  'My favorite color is blue'");
+    println!("  'Remember that John likes pizza'");
+    println!("  'Remind me to call mom tomorrow'");
+    println!();
+    println!("Query examples:");
+    println!("  'What is my favorite color?'");
+    println!("  'Who should I call?'");
+    println!("  'What do I know about John?'");
+    println!();
+    println!("Commands:");
+    println!("  stats           - Show statistics");
+    println!("  tasks           - List all tasks");
+    println!("  memories        - List all memories");
+    println!("  classify <text> - Preview classification without storing");
+    println!("  delete <id>     - Delete item by ID");
+    println!("  clear           - Clear all data");
+    println!("  help            - Show this help");
+    println!("  quit            - Exit");
 }
