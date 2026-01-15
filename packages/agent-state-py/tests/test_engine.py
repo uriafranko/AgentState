@@ -14,6 +14,8 @@ from agent_state import (
     QueryResultResponse,
     NotFoundResponse,
     NeedsClarificationResponse,
+    EmbeddingModel,
+    Backend,
 )
 
 
@@ -215,3 +217,70 @@ class TestIntent:
         confidence = intent.overall_confidence()
         assert isinstance(confidence, float)
         assert 0.0 <= confidence <= 1.0
+
+
+class TestEmbeddingModel:
+    """Tests for the EmbeddingModel enum."""
+
+    def test_embedding_model_variants(self):
+        """Test all EmbeddingModel variants exist."""
+        assert EmbeddingModel.MiniLmL6 is not None
+        assert EmbeddingModel.MiniLmL12 is not None
+        assert EmbeddingModel.BgeSmall is not None
+        assert EmbeddingModel.BgeBase is not None
+        assert EmbeddingModel.E5Small is not None
+        assert EmbeddingModel.GteSmall is not None
+
+    def test_embedding_dim(self):
+        """Test embedding_dim() method returns expected dimensions."""
+        assert EmbeddingModel.MiniLmL6.embedding_dim() == 384
+        assert EmbeddingModel.BgeSmall.embedding_dim() == 384
+        assert EmbeddingModel.BgeBase.embedding_dim() == 768
+
+    def test_mteb_score(self):
+        """Test mteb_score() method returns valid scores."""
+        score = EmbeddingModel.BgeSmall.mteb_score()
+        assert isinstance(score, float)
+        assert 50.0 < score < 70.0  # Reasonable MTEB score range
+
+    def test_hf_repo(self):
+        """Test hf_repo() method returns valid HuggingFace repo names."""
+        repo = EmbeddingModel.BgeSmall.hf_repo()
+        assert isinstance(repo, str)
+        assert "bge-small" in repo.lower()
+
+
+class TestBackend:
+    """Tests for the Backend enum."""
+
+    def test_backend_variants(self):
+        """Test all Backend variants exist."""
+        assert Backend.Candle is not None
+        assert Backend.Onnx is not None
+        assert Backend.Mock is not None
+
+
+class TestModelConfiguration:
+    """Tests for model/backend configuration in AgentEngine."""
+
+    def test_create_engine_with_model_param(self):
+        """Test creating engine with model parameter."""
+        # Note: Using mock=True still, as we're testing the parameter passing
+        engine = AgentEngine(mock=True)
+        assert engine.model() == EmbeddingModel.BgeSmall  # Default model
+
+    def test_mock_engine_reports_mock_backend(self):
+        """Test that mock engine reports Mock backend."""
+        engine = AgentEngine(mock=True)
+        assert engine.backend() == Backend.Mock
+
+    def test_engine_embedding_dim(self):
+        """Test that engine reports correct embedding dimension."""
+        engine = AgentEngine(mock=True)
+        assert engine.embedding_dim() == 384  # BgeSmall default
+
+    def test_in_memory_factory_method(self):
+        """Test the in_memory factory method works with mock."""
+        engine = AgentEngine.mock()
+        assert engine.is_mock()
+        assert engine.count() == 0

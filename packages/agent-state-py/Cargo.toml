@@ -9,12 +9,18 @@ license = "MIT"
 name = "_core"
 crate-type = ["cdylib"]
 
+[features]
+default = ["candle-backend"]
+candle-backend = ["agent-brain/candle-backend"]
+onnx-backend = ["agent-brain/onnx-backend"]
+all-backends = ["candle-backend", "onnx-backend"]
+
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 anyhow = "1.0"
 
-# Link to the core Rust library
-agent-brain = { path = "../agent-state-rs" }
+# Link to the core Rust library with feature pass-through
+agent-brain = { path = "../agent-state-rs", default-features = false }
 
 [profile.release]
 opt-level = 3

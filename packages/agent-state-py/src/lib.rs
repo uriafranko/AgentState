@@ -12,6 +12,8 @@ use agent_brain::{
     Action as RustAction,
     Intent as RustIntent,
     TimeFilter as RustTimeFilter,
+    EmbeddingModel as RustEmbeddingModel,
+    Backend as RustBackend,
 };
 
 /// Convert Rust errors to Python exceptions
@@ -27,6 +29,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Action>()?;
     m.add_class::<Intent>()?;
     m.add_class::<TimeFilter>()?;
+    m.add_class::<EmbeddingModel>()?;
+    m.add_class::<Backend>()?;
     m.add_class::<StoredResponse>()?;
     m.add_class::<QueryResultResponse>()?;
     m.add_class::<NotFoundResponse>()?;
@@ -35,8 +39,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 /// Type of data being stored or queried
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DataType {
     /// Action items, reminders, todos
     Task,
@@ -97,8 +101,8 @@ impl DataType {
 }
 
 /// The action the agent wants to perform
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Store information
     Store,
@@ -135,8 +139,8 @@ impl Action {
 }
 
 /// Time filter for queries
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TimeFilter {
     /// No time filtering
     All,
@@ -167,6 +171,115 @@ impl TimeFilter {
             TimeFilter::Today => "TimeFilter.TODAY",
             TimeFilter::LastWeek => "TimeFilter.LAST_WEEK",
             TimeFilter::LastMonth => "TimeFilter.LAST_MONTH",
+        }
+    }
+}
+
+/// Embedding model to use for text encoding
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmbeddingModel {
+    /// all-MiniLM-L6-v2 - Fast, 384 dims, MTEB score 56.3
+    MiniLmL6,
+    /// all-MiniLM-L12-v2 - Better accuracy, 384 dims, MTEB score 59.8
+    MiniLmL12,
+    /// BGE-Small-en-v1.5 - Best small model (default), 384 dims, MTEB score 62.2
+    BgeSmall,
+    /// BGE-Base-en-v1.5 - Best accuracy, 768 dims, MTEB score 64.2
+    BgeBase,
+    /// E5-Small-v2 - Good alternative, 384 dims, MTEB score 61.5
+    E5Small,
+    /// GTE-Small - Competitive model, 384 dims, MTEB score 61.4
+    GteSmall,
+}
+
+impl From<EmbeddingModel> for RustEmbeddingModel {
+    fn from(m: EmbeddingModel) -> Self {
+        match m {
+            EmbeddingModel::MiniLmL6 => RustEmbeddingModel::MiniLmL6,
+            EmbeddingModel::MiniLmL12 => RustEmbeddingModel::MiniLmL12,
+            EmbeddingModel::BgeSmall => RustEmbeddingModel::BgeSmall,
+            EmbeddingModel::BgeBase => RustEmbeddingModel::BgeBase,
+            EmbeddingModel::E5Small => RustEmbeddingModel::E5Small,
+            EmbeddingModel::GteSmall => RustEmbeddingModel::GteSmall,
+        }
+    }
+}
+
+impl From<RustEmbeddingModel> for EmbeddingModel {
+    fn from(m: RustEmbeddingModel) -> Self {
+        match m {
+            RustEmbeddingModel::MiniLmL6 => EmbeddingModel::MiniLmL6,
+            RustEmbeddingModel::MiniLmL12 => EmbeddingModel::MiniLmL12,
+            RustEmbeddingModel::BgeSmall => EmbeddingModel::BgeSmall,
+            RustEmbeddingModel::BgeBase => EmbeddingModel::BgeBase,
+            RustEmbeddingModel::E5Small => EmbeddingModel::E5Small,
+            RustEmbeddingModel::GteSmall => EmbeddingModel::GteSmall,
+        }
+    }
+}
+
+#[pymethods]
+impl EmbeddingModel {
+    /// Get the embedding dimension for this model
+    fn embedding_dim(&self) -> usize {
+        RustEmbeddingModel::from(self.clone()).embedding_dim()
+    }
+
+    /// Get the MTEB benchmark score for this model
+    fn mteb_score(&self) -> f32 {
+        RustEmbeddingModel::from(self.clone()).mteb_score()
+    }
+
+    /// Get the HuggingFace repository name
+    fn hf_repo(&self) -> &'static str {
+        RustEmbeddingModel::from(self.clone()).hf_repo()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("EmbeddingModel.{:?}", self)
+    }
+}
+
+/// Backend for model inference
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Backend {
+    /// Candle - Pure Rust, no external dependencies (default)
+    Candle,
+    /// ONNX Runtime - Optimized inference, requires onnx-backend feature
+    Onnx,
+    /// Mock - Hash-based embeddings for testing (no model required)
+    Mock,
+}
+
+impl From<Backend> for RustBackend {
+    fn from(b: Backend) -> Self {
+        match b {
+            Backend::Candle => RustBackend::Candle,
+            Backend::Onnx => RustBackend::Onnx,
+            Backend::Mock => RustBackend::Mock,
+        }
+    }
+}
+
+impl From<RustBackend> for Backend {
+    fn from(b: RustBackend) -> Self {
+        match b {
+            RustBackend::Candle => Backend::Candle,
+            RustBackend::Onnx => Backend::Onnx,
+            RustBackend::Mock => Backend::Mock,
+        }
+    }
+}
+
+#[pymethods]
+impl Backend {
+    fn __repr__(&self) -> &'static str {
+        match self {
+            Backend::Candle => "Backend.CANDLE",
+            Backend::Onnx => "Backend.ONNX",
+            Backend::Mock => "Backend.MOCK",
         }
     }
 }
@@ -423,29 +536,78 @@ impl AgentEngine {
     /// Args:
     ///     db_path: Path to SQLite database. Uses in-memory if None or ":memory:".
     ///     mock: If True, uses mock embeddings for testing (no model download required).
+    ///     model: Embedding model to use (default: BgeSmall).
+    ///     backend: Backend for inference (default: Candle, or Onnx if available).
+    ///
+    /// Example:
+    ///     # Default configuration
+    ///     engine = AgentEngine()
+    ///
+    ///     # With specific model and backend
+    ///     engine = AgentEngine(model=EmbeddingModel.BgeBase, backend=Backend.Onnx)
+    ///
+    ///     # Mock mode for testing
+    ///     engine = AgentEngine(mock=True)
     #[new]
-    #[pyo3(signature = (db_path=None, mock=false))]
-    fn new(db_path: Option<String>, mock: bool) -> PyResult<Self> {
-        let path = db_path.as_deref().unwrap_or(":memory:");
+    #[pyo3(signature = (db_path=None, mock=false, model=None, backend=None))]
+    fn new(
+        db_path: Option<String>,
+        mock: bool,
+        model: Option<EmbeddingModel>,
+        backend: Option<Backend>,
+    ) -> PyResult<Self> {
+        let mut builder = RustEngine::builder();
 
-        let engine = if mock {
-            RustEngine::new_mock(path).map_err(to_py_err)?
+        // Set database path or in-memory
+        if let Some(path) = db_path {
+            if path == ":memory:" {
+                builder = builder.in_memory();
+            } else {
+                builder = builder.db_path(path);
+            }
         } else {
-            RustEngine::new(path).map_err(to_py_err)?
-        };
+            builder = builder.in_memory();
+        }
 
+        // Set mock mode
+        if mock {
+            builder = builder.mock();
+        } else {
+            // Set model if specified
+            if let Some(m) = model {
+                builder = builder.model(m.into());
+            }
+
+            // Set backend if specified
+            if let Some(b) = backend {
+                builder = builder.backend(b.into());
+            }
+        }
+
+        let engine = builder.build().map_err(to_py_err)?;
         Ok(AgentEngine { engine })
     }
 
     /// Create an in-memory engine (shorthand for AgentEngine(":memory:"))
     #[staticmethod]
-    fn in_memory() -> PyResult<Self> {
-        let engine = RustEngine::new_in_memory().map_err(to_py_err)?;
+    #[pyo3(signature = (model=None, backend=None))]
+    fn in_memory(model: Option<EmbeddingModel>, backend: Option<Backend>) -> PyResult<Self> {
+        let mut builder = RustEngine::builder().in_memory();
+
+        if let Some(m) = model {
+            builder = builder.model(m.into());
+        }
+        if let Some(b) = backend {
+            builder = builder.backend(b.into());
+        }
+
+        let engine = builder.build().map_err(to_py_err)?;
         Ok(AgentEngine { engine })
     }
 
     /// Create a mock engine for testing (no model download required)
     #[staticmethod]
+    #[pyo3(signature = (db_path=None))]
     fn mock(db_path: Option<String>) -> PyResult<Self> {
         let path = db_path.as_deref().unwrap_or(":memory:");
         let engine = RustEngine::new_mock(path).map_err(to_py_err)?;
@@ -455,6 +617,21 @@ impl AgentEngine {
     /// Returns whether this engine is running in mock mode
     fn is_mock(&self) -> bool {
         self.engine.is_mock()
+    }
+
+    /// Returns the configured embedding model
+    fn model(&self) -> EmbeddingModel {
+        self.engine.model().into()
+    }
+
+    /// Returns the configured backend
+    fn backend(&self) -> Backend {
+        self.engine.backend().into()
+    }
+
+    /// Returns the embedding dimension for the configured model
+    fn embedding_dim(&self) -> usize {
+        self.engine.embedding_dim()
     }
 
     /// Process natural language input
