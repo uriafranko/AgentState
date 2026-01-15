@@ -253,24 +253,29 @@ curl -L -o models/bge-base/model.safetensors "https://huggingface.co/BAAI/bge-ba
 ### Selecting a Model
 
 ```rust
-use agent_brain::{AgentEngine, BrainConfig, EmbeddingModel, Backend};
+use agent_brain::{AgentEngine, EmbeddingModel, Backend};
 
 // Default: BGE-Small with Candle backend
 let engine = AgentEngine::new("agent.db")?;
 
-// Fast mode: MiniLM-L6
-let engine = AgentEngine::new_fast("agent.db")?;
+// Builder pattern for customization
+let engine = AgentEngine::builder()
+    .db_path("agent.db")
+    .model(EmbeddingModel::BgeBase)  // Most accurate (768 dims)
+    .backend(Backend::Candle)
+    .build()?;
 
-// Accurate mode: BGE-Base (768 dims)
-let engine = AgentEngine::new_accurate("agent.db")?;
+// In-memory database for testing
+let engine = AgentEngine::builder()
+    .in_memory()
+    .model(EmbeddingModel::MiniLmL6)  // Fast model
+    .build()?;
 
-// Custom configuration
-let config = BrainConfig {
-    model: EmbeddingModel::BgeBase,
-    backend: Backend::Candle,
-    local_model_dir: None,
-};
-let engine = AgentEngine::with_config("agent.db", config)?;
+// Mock mode (no ML model needed)
+let engine = AgentEngine::builder()
+    .in_memory()
+    .mock()
+    .build()?;
 ```
 
 ### Intent Classification

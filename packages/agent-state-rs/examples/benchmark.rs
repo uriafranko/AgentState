@@ -7,7 +7,7 @@
 //!
 //! Run with: cargo run --release --example benchmark
 
-use agent_brain::{AgentEngine, AgentResponse, Backend, BrainConfig, EmbeddingModel, Action, DataType};
+use agent_brain::{AgentEngine, AgentResponse, Backend, EmbeddingModel, Action, DataType};
 use std::time::{Duration, Instant};
 
 /// Test cases for classification accuracy
@@ -84,7 +84,7 @@ fn main() {
     println!("═══════════════════════════════════════════════════════════════════");
     println!("MOCK MODE BENCHMARK (baseline, no ML model)");
     println!("═══════════════════════════════════════════════════════════════════");
-    run_benchmark(BrainConfig::mock(), "Mock (hash-based)");
+    let _ = run_benchmark_mock("Mock (hash-based)");
 
     // Print model comparison table
     println!();
@@ -130,23 +130,15 @@ fn main() {
     println!("(First run may download ~90MB per model)");
     println!();
 
-    // Try each model config
+    // Try each model config using the builder pattern
     let configs = [
-        (BrainConfig {
-            model: EmbeddingModel::MiniLmL6,
-            backend: Backend::Candle,
-            local_model_dir: None,
-        }, "MiniLM-L6 (Candle)"),
-        (BrainConfig {
-            model: EmbeddingModel::BgeSmall,
-            backend: Backend::Candle,
-            local_model_dir: None,
-        }, "BGE-Small (Candle)"),
+        (EmbeddingModel::MiniLmL6, Backend::Candle, "MiniLM-L6 (Candle)"),
+        (EmbeddingModel::BgeSmall, Backend::Candle, "BGE-Small (Candle)"),
     ];
 
-    for (config, name) in configs {
+    for (model, backend, name) in configs {
         println!("-------------------------------------------------------------------");
-        if let Err(e) = run_benchmark(config, name) {
+        if let Err(e) = run_benchmark(model, backend, name) {
             println!("  Skipped: {} ({})", name, e);
         }
     }
@@ -164,33 +156,62 @@ fn main() {
     println!();
 }
 
-fn run_benchmark(config: BrainConfig, name: &str) -> Result<(), String> {
+fn run_benchmark_mock(name: &str) -> Result<(), String> {
     println!();
     println!("Benchmarking: {}", name);
-    println!("  Model: {:?}, Backend: {:?}, Dims: {}",
-             config.model, config.backend, config.model.embedding_dim());
+    println!("  Model: Mock, Backend: Mock, Dims: 384");
     println!();
 
-    // Initialize engine
+    // Initialize engine using builder pattern
     let init_start = Instant::now();
-    let mut engine = AgentEngine::with_config(":memory:", config)
+    let mut engine = AgentEngine::builder()
+        .in_memory()
+        .mock()
+        .build()
         .map_err(|e| e.to_string())?;
     let init_time = init_start.elapsed();
     println!("  Initialization: {:?}", init_time);
 
+    // Run benchmarks
+    run_benchmark_suite(&mut engine)
+}
+
+fn run_benchmark(model: EmbeddingModel, backend: Backend, name: &str) -> Result<(), String> {
+    println!();
+    println!("Benchmarking: {}", name);
+    println!("  Model: {:?}, Backend: {:?}, Dims: {}",
+             model, backend, model.embedding_dim());
+    println!();
+
+    // Initialize engine using builder pattern
+    let init_start = Instant::now();
+    let mut engine = AgentEngine::builder()
+        .in_memory()
+        .model(model)
+        .backend(backend)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let init_time = init_start.elapsed();
+    println!("  Initialization: {:?}", init_time);
+
+    // Run benchmarks
+    run_benchmark_suite(&mut engine)
+}
+
+fn run_benchmark_suite(engine: &mut AgentEngine) -> Result<(), String> {
     // Benchmark embedding generation
-    let embed_times = benchmark_embeddings(&mut engine);
+    let embed_times = benchmark_embeddings(engine);
     println!("  Embedding (first): {:?}", embed_times.0);
     println!("  Embedding (cached): {:?}", embed_times.1);
     println!("  Embedding (avg 10): {:?}", embed_times.2);
 
     // Benchmark classification accuracy
-    let (action_acc, type_acc) = benchmark_classification(&mut engine);
+    let (action_acc, type_acc) = benchmark_classification(engine);
     println!("  Action accuracy: {:.1}%", action_acc * 100.0);
     println!("  DataType accuracy: {:.1}%", type_acc * 100.0);
 
     // Benchmark search relevance
-    let search_acc = benchmark_search(&mut engine);
+    let search_acc = benchmark_search(engine);
     println!("  Search relevance: {:.1}%", search_acc * 100.0);
 
     Ok(())

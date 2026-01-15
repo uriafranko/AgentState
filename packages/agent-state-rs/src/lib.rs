@@ -38,7 +38,7 @@ pub mod federation;
 pub mod metrics;
 mod storage;
 
-pub use brain::{Action, Backend, Brain, BrainConfig, DataType, EmbeddingModel, Intent};
+pub use brain::{Action, Backend, Brain, BrainConfig, BrainConfigBuilder, DataType, EmbeddingModel, Intent};
 pub use federation::{FederatedEngine, FederationConfig};
 pub use metrics::{Metrics, Operation, OperationStats};
 pub use storage::{KnowledgeItem, Storage, TimeFilter};
@@ -154,14 +154,123 @@ impl AgentResponse {
 ///
 /// This is the primary interface. Agents interact through a single `process()`
 /// method that automatically understands intent and routes accordingly.
+///
+/// # Examples
+///
+/// ```no_run
+/// use agent_brain::{AgentEngine, EmbeddingModel};
+///
+/// // Default configuration (BGE-Small model)
+/// let engine = AgentEngine::new("agent.db")?;
+///
+/// // With builder pattern for customization
+/// let engine = AgentEngine::builder()
+///     .db_path("agent.db")
+///     .model(EmbeddingModel::BgeBase)
+///     .build()?;
+///
+/// // In-memory database for testing
+/// let engine = AgentEngine::builder()
+///     .in_memory()
+///     .mock()  // Use mock embeddings (no model download)
+///     .build()?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub struct AgentEngine {
     brain: Brain,
     storage: Storage,
     metrics: Metrics,
 }
 
+/// Builder for AgentEngine - provides fluent API for configuration
+pub struct AgentEngineBuilder {
+    db_path: Option<String>,
+    in_memory: bool,
+    brain_config: BrainConfigBuilder,
+    metrics_enabled: bool,
+}
+
+impl Default for AgentEngineBuilder {
+    fn default() -> Self {
+        Self {
+            db_path: None,
+            in_memory: false,
+            brain_config: BrainConfigBuilder::default(),
+            metrics_enabled: true,
+        }
+    }
+}
+
+impl AgentEngineBuilder {
+    /// Set the database file path
+    pub fn db_path<S: Into<String>>(mut self, path: S) -> Self {
+        self.db_path = Some(path.into());
+        self.in_memory = false;
+        self
+    }
+
+    /// Use an in-memory database (useful for testing)
+    pub fn in_memory(mut self) -> Self {
+        self.in_memory = true;
+        self.db_path = None;
+        self
+    }
+
+    /// Set the embedding model to use
+    pub fn model(mut self, model: EmbeddingModel) -> Self {
+        self.brain_config = self.brain_config.model(model);
+        self
+    }
+
+    /// Set the backend for inference
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.brain_config = self.brain_config.backend(backend);
+        self
+    }
+
+    /// Set a local model directory (bypasses HuggingFace download)
+    pub fn local_model_dir<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.brain_config = self.brain_config.local_model_dir(path);
+        self
+    }
+
+    /// Enable mock mode for testing (no real model needed)
+    pub fn mock(mut self) -> Self {
+        self.brain_config = self.brain_config.mock();
+        self
+    }
+
+    /// Disable metrics collection
+    pub fn without_metrics(mut self) -> Self {
+        self.metrics_enabled = false;
+        self
+    }
+
+    /// Build the AgentEngine
+    pub fn build(self) -> Result<AgentEngine> {
+        let db_path = if self.in_memory {
+            ":memory:".to_string()
+        } else {
+            self.db_path.ok_or_else(|| anyhow::anyhow!(
+                "Database path required. Use .db_path(\"path\") or .in_memory()"
+            ))?
+        };
+
+        let brain_config = self.brain_config.build();
+        let brain = Brain::with_config(brain_config).context("Failed to initialize Brain")?;
+        let storage = Storage::new(&db_path).context("Failed to initialize Storage")?;
+        let metrics = if self.metrics_enabled {
+            Metrics::new()
+        } else {
+            Metrics::disabled()
+        };
+
+        Ok(AgentEngine { brain, storage, metrics })
+    }
+}
+
 impl AgentEngine {
-    /// Creates a new AgentEngine instance with default configuration
+    /// Creates a new AgentEngine with default configuration
     ///
     /// Uses BGE-Small model (best accuracy for 384 dimensions) with the best available backend.
     /// Downloads and caches the model on first run (~90MB).
@@ -169,66 +278,25 @@ impl AgentEngine {
     /// # Arguments
     /// * `db_path` - Path to the SQLite database file
     pub fn new(db_path: &str) -> Result<Self> {
-        Self::with_config(db_path, BrainConfig::default())
+        Self::builder().db_path(db_path).build()
     }
 
-    /// Creates a new AgentEngine with custom Brain configuration
+    /// Creates a builder for customizing the AgentEngine
     ///
-    /// # Example
+    /// # Examples
+    ///
     /// ```no_run
-    /// use agent_brain::{AgentEngine, BrainConfig, EmbeddingModel};
+    /// use agent_brain::{AgentEngine, EmbeddingModel, Backend};
     ///
-    /// // Use the most accurate model (768 dimensions)
-    /// let config = BrainConfig::accurate();
-    /// let engine = AgentEngine::with_config("agent.db", config)?;
+    /// let engine = AgentEngine::builder()
+    ///     .db_path("agent.db")
+    ///     .model(EmbeddingModel::BgeBase)  // Most accurate
+    ///     .backend(Backend::Candle)
+    ///     .build()?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
-    pub fn with_config(db_path: &str, config: BrainConfig) -> Result<Self> {
-        let brain = Brain::with_config(config).context("Failed to initialize Brain")?;
-        let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
-        let metrics = Metrics::new();
-        Ok(Self { brain, storage, metrics })
-    }
-
-    /// Creates an AgentEngine with an in-memory database (useful for testing)
-    pub fn new_in_memory() -> Result<Self> {
-        Self::new(":memory:")
-    }
-
-    /// Creates an AgentEngine optimized for speed (MiniLM-L6)
-    pub fn new_fast(db_path: &str) -> Result<Self> {
-        Self::with_config(db_path, BrainConfig::fast())
-    }
-
-    /// Creates an AgentEngine optimized for accuracy (BGE-Base, 768 dims)
-    pub fn new_accurate(db_path: &str) -> Result<Self> {
-        Self::with_config(db_path, BrainConfig::accurate())
-    }
-
-    /// Creates an AgentEngine with metrics disabled
-    pub fn new_without_metrics(db_path: &str) -> Result<Self> {
-        let brain = Brain::new().context("Failed to initialize Brain")?;
-        let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
-        let metrics = Metrics::disabled();
-        Ok(Self { brain, storage, metrics })
-    }
-
-    /// Creates an AgentEngine in mock mode for testing
-    ///
-    /// Uses hash-based deterministic embeddings instead of the ML model.
-    /// This allows testing all functionality without requiring the actual model files.
-    pub fn new_mock(db_path: &str) -> Result<Self> {
-        let brain = Brain::new_mock().context("Failed to initialize mock Brain")?;
-        let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
-        let metrics = Metrics::new();
-        Ok(Self { brain, storage, metrics })
-    }
-
-    /// Creates an in-memory AgentEngine in mock mode for testing
-    ///
-    /// Combines in-memory database with mock embeddings for fast, isolated testing.
-    pub fn new_mock_in_memory() -> Result<Self> {
-        Self::new_mock(":memory:")
+    pub fn builder() -> AgentEngineBuilder {
+        AgentEngineBuilder::default()
     }
 
     /// Returns whether this engine is running in mock mode
@@ -249,6 +317,31 @@ impl AgentEngine {
     /// Returns the embedding dimension for the configured model
     pub fn embedding_dim(&self) -> usize {
         self.brain.embedding_dim()
+    }
+
+    // =========================================================================
+    // CONVENIENCE CONSTRUCTORS (use builder() for full customization)
+    // =========================================================================
+
+    /// Creates an in-memory AgentEngine (useful for testing)
+    ///
+    /// Uses default configuration. For customization, use `builder().in_memory()...`.
+    pub fn new_in_memory() -> Result<Self> {
+        Self::builder().in_memory().build()
+    }
+
+    /// Creates an in-memory AgentEngine in mock mode (fast testing)
+    ///
+    /// Uses hash-based embeddings instead of real ML model.
+    pub fn new_mock_in_memory() -> Result<Self> {
+        Self::builder().in_memory().mock().build()
+    }
+
+    /// Creates an AgentEngine in mock mode with specified database path
+    ///
+    /// Uses hash-based embeddings instead of real ML model.
+    pub fn new_mock(db_path: &str) -> Result<Self> {
+        Self::builder().db_path(db_path).mock().build()
     }
 
     // =========================================================================

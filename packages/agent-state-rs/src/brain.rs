@@ -138,7 +138,7 @@ impl Default for Backend {
     }
 }
 
-/// Configuration for Brain initialization
+/// Configuration for Brain initialization - use builder pattern
 #[derive(Debug, Clone)]
 pub struct BrainConfig {
     /// Which embedding model to use
@@ -160,36 +160,60 @@ impl Default for BrainConfig {
 }
 
 impl BrainConfig {
-    /// Create config for the fastest model (MiniLM-L6)
-    pub fn fast() -> Self {
-        Self {
-            model: EmbeddingModel::MiniLmL6,
-            ..Default::default()
-        }
+    /// Create a new configuration builder
+    pub fn builder() -> BrainConfigBuilder {
+        BrainConfigBuilder::default()
+    }
+}
+
+/// Builder for BrainConfig - provides fluent API for configuration
+#[derive(Debug, Clone, Default)]
+pub struct BrainConfigBuilder {
+    model: Option<EmbeddingModel>,
+    backend: Option<Backend>,
+    local_model_dir: Option<std::path::PathBuf>,
+    mock_mode: bool,
+}
+
+impl BrainConfigBuilder {
+    /// Set the embedding model to use
+    pub fn model(mut self, model: EmbeddingModel) -> Self {
+        self.model = Some(model);
+        self
     }
 
-    /// Create config for the most accurate model (BGE-Base)
-    pub fn accurate() -> Self {
-        Self {
-            model: EmbeddingModel::BgeBase,
-            ..Default::default()
-        }
+    /// Set the backend for inference
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.backend = Some(backend);
+        self
     }
 
-    /// Create config for balanced performance (BGE-Small)
-    pub fn balanced() -> Self {
-        Self {
-            model: EmbeddingModel::BgeSmall,
-            ..Default::default()
-        }
+    /// Set a local model directory (bypasses HuggingFace download)
+    pub fn local_model_dir<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.local_model_dir = Some(path.into());
+        self
     }
 
-    /// Create config for testing (mock mode)
-    pub fn mock() -> Self {
-        Self {
-            model: EmbeddingModel::MiniLmL6, // doesn't matter for mock
-            backend: Backend::Mock,
-            local_model_dir: None,
+    /// Enable mock mode for testing (no real model needed)
+    pub fn mock(mut self) -> Self {
+        self.mock_mode = true;
+        self
+    }
+
+    /// Build the configuration
+    pub fn build(self) -> BrainConfig {
+        if self.mock_mode {
+            BrainConfig {
+                model: self.model.unwrap_or_default(),
+                backend: Backend::Mock,
+                local_model_dir: None,
+            }
+        } else {
+            BrainConfig {
+                model: self.model.unwrap_or_default(),
+                backend: self.backend.unwrap_or_default(),
+                local_model_dir: self.local_model_dir,
+            }
         }
     }
 }
@@ -361,7 +385,7 @@ impl Brain {
 
     /// Creates a new Brain in mock mode for testing
     pub fn new_mock() -> Result<Self> {
-        Self::with_config(BrainConfig::mock())
+        Self::with_config(BrainConfig::builder().mock().build())
     }
 
     fn new_mock_internal(config: BrainConfig) -> Result<Self> {
