@@ -54,14 +54,51 @@ pub struct Intent {
 }
 
 impl Brain {
-    /// Creates a new Brain instance by loading the MiniLM model from HuggingFace
+    /// Creates a new Brain instance by loading the MiniLM model
     ///
-    /// This will automatically download and cache the model on first run.
-    /// Subsequent runs will use the cached version.
+    /// First tries to load from local `models/minilm` directory, then falls back
+    /// to downloading from HuggingFace Hub (cached in ~/.cache/huggingface).
     pub fn new() -> Result<Self> {
-        let device = Device::Cpu; // MiniLM is small enough for CPU inference
+        // Try local models directory first
+        let local_model_dir = std::path::Path::new("models/minilm");
+        if local_model_dir.exists() {
+            return Self::new_from_local(local_model_dir);
+        }
 
-        // 1. Load Model from HuggingFace Hub (Cached automatically in ~/.cache/huggingface)
+        // Fall back to HuggingFace Hub download
+        Self::new_from_huggingface()
+    }
+
+    /// Creates a new Brain instance from local model files
+    ///
+    /// Expects the directory to contain: config.json, tokenizer.json, model.safetensors
+    pub fn new_from_local(model_dir: &std::path::Path) -> Result<Self> {
+        let device = Device::Cpu;
+
+        let config_filename = model_dir.join("config.json");
+        let tokenizer_filename = model_dir.join("tokenizer.json");
+        let weights_filename = model_dir.join("model.safetensors");
+
+        // Verify files exist
+        if !config_filename.exists() {
+            anyhow::bail!("config.json not found in {:?}", model_dir);
+        }
+        if !tokenizer_filename.exists() {
+            anyhow::bail!("tokenizer.json not found in {:?}", model_dir);
+        }
+        if !weights_filename.exists() {
+            anyhow::bail!("model.safetensors not found in {:?}", model_dir);
+        }
+
+        Self::load_model(device, &config_filename, &tokenizer_filename, &weights_filename)
+    }
+
+    /// Creates a new Brain instance by downloading from HuggingFace Hub
+    ///
+    /// Downloads are cached automatically in ~/.cache/huggingface
+    pub fn new_from_huggingface() -> Result<Self> {
+        let device = Device::Cpu;
+
         let api = Api::new().context("Failed to initialize HuggingFace API")?;
         let repo = api.repo(Repo::new(
             "sentence-transformers/all-MiniLM-L6-v2".to_string(),
@@ -77,6 +114,17 @@ impl Brain {
         let weights_filename = repo
             .get("model.safetensors")
             .context("Failed to download model.safetensors")?;
+
+        Self::load_model(device, &config_filename, &tokenizer_filename, &weights_filename)
+    }
+
+    /// Internal method to load model from file paths
+    fn load_model(
+        device: Device,
+        config_filename: &std::path::Path,
+        tokenizer_filename: &std::path::Path,
+        weights_filename: &std::path::Path,
+    ) -> Result<Self> {
 
         // Parse model configuration
         let config: Config = serde_json::from_str(
