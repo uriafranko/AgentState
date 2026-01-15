@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+debug/
+release/
+
+# Cargo lock file (optional, but useful for applications)
+# Cargo.lock
+
+# Database files created during testing
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache (models are downloaded here)
+# ~/.cache/huggingface/ - this is in home dir, not project
+
+# Backup files
+*.bak
+*~
