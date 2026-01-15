@@ -27,13 +27,43 @@ The `AgentResponse` enum provides structured feedback:
 
 Use `response.to_agent_string()` for simple text output.
 
+## Monorepo Structure
+
+This is a monorepo containing multiple packages:
+
+```
+packages/
+├── agent-state-rs/     # Rust core engine (stable)
+│   ├── src/
+│   │   ├── lib.rs      # Public API (AgentEngine, AgentResponse)
+│   │   ├── brain.rs    # AI model loading, embeddings, intent classification
+│   │   ├── storage.rs  # SQLite database with vector storage
+│   │   └── main.rs     # CLI demo/interactive mode
+│   ├── tests/
+│   │   └── storage_tests.rs
+│   └── examples/
+│       └── demo.rs
+├── agent-state-py/     # Python SDK (alpha)
+│   ├── python/         # Pure Python implementation
+│   │   └── agent_state/
+│   ├── src/            # Rust bindings (PyO3)
+│   └── tests/
+└── agent-state-ts/     # TypeScript SDK (placeholder)
+    ├── src/
+    └── tests/
+```
+
 ## Testing Requirements
 
 ### Always Run Tests After Significant Changes
 
 **CRITICAL**: After making any significant changes to the codebase, you MUST run the test suite to verify nothing is broken.
 
+### Rust Package
+
 ```bash
+cd packages/agent-state-rs
+
 # Run all tests (unit + integration)
 cargo test
 
@@ -47,6 +77,27 @@ cargo test --lib
 cargo test --test storage_tests
 ```
 
+### Python SDK
+
+```bash
+cd packages/agent-state-py
+
+# Run tests
+pytest
+
+# Run with coverage
+pytest --cov=agent_state
+```
+
+### TypeScript SDK
+
+```bash
+cd packages/agent-state-ts
+
+# Run tests
+npm test
+```
+
 ### What Counts as "Significant Changes"
 
 Run tests after:
@@ -58,35 +109,25 @@ Run tests after:
 - Fixing bugs
 - Adding new dependencies
 
-### Test Categories
-
-1. **Unit Tests** (in `src/*.rs` files)
-   - Fast, isolated tests
-   - Located in `#[cfg(test)]` modules
-   - Tests marked `#[ignore]` require model download
-
-2. **Integration Tests** (in `tests/` directory)
-   - `tests/storage_tests.rs` - Database operation tests
-   - Test actual data insertion, retrieval, and integrity
-
 ### Before Committing
 
 Always ensure:
-1. `cargo check` passes (no compilation errors)
-2. `cargo test --lib` passes (unit tests)
-3. `cargo test --test storage_tests` passes (integration tests)
-4. `cargo clippy` has no warnings (if available)
+1. `cargo check` passes in `packages/agent-state-rs/`
+2. `cargo test` passes in `packages/agent-state-rs/`
+3. `cargo clippy` has no warnings (if available)
 
 ```bash
-# Quick pre-commit check
-cargo check && cargo test
+# Quick pre-commit check for Rust
+cd packages/agent-state-rs && cargo check && cargo test
 ```
 
 ## Code Quality
 
-### Compilation Checks
+### Compilation Checks (Rust)
 
 ```bash
+cd packages/agent-state-rs
+
 # Check for compilation errors
 cargo check
 
@@ -97,6 +138,8 @@ cargo check 2>&1 | head -50
 ### Running the Application
 
 ```bash
+cd packages/agent-state-rs
+
 # Build and run (debug - slow, for development only)
 cargo run
 
@@ -134,6 +177,8 @@ engine.brain.clear_cache()   // Clear if needed
 ### Running the Demo
 
 ```bash
+cd packages/agent-state-rs
+
 # Run demo with optimizations (required for reasonable performance)
 cargo run --release --example demo
 ```
@@ -141,44 +186,32 @@ cargo run --release --example demo
 ### Model Loading
 
 The MiniLM model can be loaded from:
-1. **Local files** (preferred): `models/minilm/` directory
+1. **Local files** (preferred): `packages/agent-state-rs/models/minilm/` directory
 2. **HuggingFace Hub**: Downloads automatically (~90MB, cached in `~/.cache/huggingface`)
 
 To use local model (faster startup, works offline):
 ```bash
+cd packages/agent-state-rs
 mkdir -p models/minilm
 curl -L -o models/minilm/config.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
 curl -L -o models/minilm/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
 curl -L -o models/minilm/model.safetensors "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
 ```
 
-## Architecture Overview
+## Key Components (Rust Core)
 
-```
-src/
-├── brain.rs     # AI model loading, embeddings, intent classification
-├── storage.rs   # SQLite database with vector storage
-├── lib.rs       # Public API (AgentEngine, AgentResponse)
-└── main.rs      # CLI demo/interactive mode
-
-tests/
-└── storage_tests.rs  # Comprehensive DB tests
-```
-
-### Key Components
-
-- **Brain**:
+- **Brain** (`packages/agent-state-rs/src/brain.rs`):
   - Loads MiniLM model (384-dim embeddings)
   - Classifies **Action** (Store vs Query)
   - Classifies **DataType** (Task vs Memory)
   - Uses zero-shot classification via anchor vectors
 
-- **Storage**:
+- **Storage** (`packages/agent-state-rs/src/storage.rs`):
   - SQLite with blob vector storage
   - Cosine similarity search
   - Category-filtered queries
 
-- **AgentEngine**:
+- **AgentEngine** (`packages/agent-state-rs/src/lib.rs`):
   - `process()` - The unified API (auto-routes by intent)
   - `store()` / `search()` - Explicit methods when needed
   - Returns `AgentResponse` for structured handling
@@ -228,6 +261,8 @@ Input: "What is my name?"
 Some tests in `src/brain.rs` and `src/lib.rs` are marked `#[ignore]` because they require downloading the MiniLM model from HuggingFace. To run these:
 
 ```bash
+cd packages/agent-state-rs
+
 # Run ignored tests (will download ~90MB model on first run)
 cargo test -- --ignored
 ```
@@ -242,3 +277,4 @@ Storage tests use `:memory:` SQLite databases for speed and isolation. Each test
 - Check for warnings with `cargo check`
 - Keep tests fast by using in-memory databases
 - Write tests that verify actual data, not just "no errors"
+- Remember to `cd` into the correct package directory before running commands
