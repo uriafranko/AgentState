@@ -9,7 +9,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use hf_hub::{api::sync::Api, Repo, RepoType};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokenizers::Tokenizer;
 
 /// Maximum number of embeddings to cache (LRU eviction when exceeded)
@@ -24,14 +24,20 @@ pub struct Brain {
     anchor_task: Tensor,
     /// Anchor vector representing "Memory" data type
     anchor_memory: Tensor,
+    /// Anchor vector representing "Preference" data type
+    anchor_preference: Tensor,
+    /// Anchor vector representing "Relationship" data type
+    anchor_relationship: Tensor,
+    /// Anchor vector representing "Event" data type
+    anchor_event: Tensor,
     /// Anchor vector representing "Store" action
     anchor_store: Tensor,
     /// Anchor vector representing "Query" action
     anchor_query: Tensor,
     /// Cache for computed embeddings (text -> embedding vector as f32 array)
     embedding_cache: HashMap<String, Vec<f32>>,
-    /// Order of cache insertions for LRU eviction
-    cache_order: Vec<String>,
+    /// Order of cache insertions for LRU eviction (VecDeque for O(1) removal from front)
+    cache_order: VecDeque<String>,
 }
 
 /// The action the agent wants to perform
@@ -44,21 +50,122 @@ pub enum Action {
 }
 
 /// The type of data being stored or queried
+///
+/// Extended data types enable richer semantic classification for AI agents.
+/// The engine auto-detects the most appropriate type based on content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
     /// Action items, reminders, todos - things that need to be done
+    /// Examples: "Remind me to call John", "I need to buy groceries"
     Task,
-    /// Facts, preferences, context - information to remember
+    /// General facts and information to remember
+    /// Examples: "The capital of France is Paris", "John's phone number is 555-1234"
     Memory,
+    /// User preferences and likes/dislikes
+    /// Examples: "I prefer dark mode", "My favorite color is blue"
+    Preference,
+    /// Relationships between entities (people, things, concepts)
+    /// Examples: "John is my colleague", "Alice works at Acme Corp"
+    Relationship,
+    /// Time-based events and appointments
+    /// Examples: "Meeting tomorrow at 3pm", "Birthday party on Saturday"
+    Event,
+}
+
+impl DataType {
+    /// Returns the category string for database storage
+    pub fn as_category(&self) -> &'static str {
+        match self {
+            DataType::Task => "task",
+            DataType::Memory => "memory",
+            DataType::Preference => "preference",
+            DataType::Relationship => "relationship",
+            DataType::Event => "event",
+        }
+    }
+
+    /// Parse from category string
+    pub fn from_category(s: &str) -> Option<Self> {
+        match s {
+            "task" => Some(DataType::Task),
+            "memory" => Some(DataType::Memory),
+            "preference" => Some(DataType::Preference),
+            "relationship" => Some(DataType::Relationship),
+            "event" => Some(DataType::Event),
+            _ => None,
+        }
+    }
+
+    /// Returns all available data types
+    pub fn all() -> &'static [DataType] {
+        &[
+            DataType::Task,
+            DataType::Memory,
+            DataType::Preference,
+            DataType::Relationship,
+            DataType::Event,
+        ]
+    }
 }
 
 /// Full intent classification result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Intent {
     /// What action to perform (store or query)
     pub action: Action,
     /// What type of data this relates to
     pub data_type: DataType,
+    /// Confidence score for action classification (0.0 to 1.0)
+    pub action_confidence: f32,
+    /// Confidence score for data type classification (0.0 to 1.0)
+    pub data_type_confidence: f32,
+}
+
+impl Intent {
+    /// Returns true if the classification is ambiguous (low confidence)
+    ///
+    /// An ambiguous intent means the engine isn't sure what the agent wants.
+    /// In a cloud/stateless environment, this should trigger a clarification request.
+    pub fn is_ambiguous(&self) -> bool {
+        self.action_confidence < 0.15 || self.data_type_confidence < 0.15
+    }
+
+    /// Returns the overall confidence (minimum of both confidences)
+    pub fn overall_confidence(&self) -> f32 {
+        self.action_confidence.min(self.data_type_confidence)
+    }
+
+    /// Returns a clarification message if the intent is ambiguous
+    ///
+    /// This is the key for cloud-ready stateless design: instead of maintaining
+    /// context, we return a message telling the agent what we need.
+    pub fn clarification_message(&self) -> Option<String> {
+        if !self.is_ambiguous() {
+            return None;
+        }
+
+        let mut issues = Vec::new();
+
+        if self.action_confidence < 0.15 {
+            issues.push(format!(
+                "I'm not sure if you want to store this information or search for something. \
+                 Try rephrasing with 'remember that...' to store, or 'what is...' to search. \
+                 (action confidence: {:.1}%)",
+                self.action_confidence * 100.0
+            ));
+        }
+
+        if self.data_type_confidence < 0.15 {
+            issues.push(format!(
+                "I can't determine if this is a task (action item) or a memory (fact/preference). \
+                 Try being more specific: 'remind me to...' for tasks, 'my favorite X is...' for memories. \
+                 (type confidence: {:.1}%)",
+                self.data_type_confidence * 100.0
+            ));
+        }
+
+        Some(issues.join("\n\n"))
+    }
 }
 
 impl Brain {
@@ -161,19 +268,31 @@ impl Brain {
             device,
             anchor_task: placeholder.clone(),
             anchor_memory: placeholder.clone(),
+            anchor_preference: placeholder.clone(),
+            anchor_relationship: placeholder.clone(),
+            anchor_event: placeholder.clone(),
             anchor_store: placeholder.clone(),
             anchor_query: placeholder,
             embedding_cache: HashMap::new(),
-            cache_order: Vec::new(),
+            cache_order: VecDeque::new(),
         };
 
         // 2. Initialize Anchor Vectors (Zero-Shot Classification Logic)
         // Data type anchors: what kind of information is this?
         brain.anchor_task = brain.embed(
-            "action item, todo, remind me to, deadline, schedule, need to do, task, appointment",
+            "action item, todo, remind me to, deadline, schedule, need to do, task, must complete",
         )?;
         brain.anchor_memory = brain.embed(
-            "fact, preference, information, context, background, remember that, note, detail about",
+            "fact, information, context, background, remember that, note, detail about, knowledge",
+        )?;
+        brain.anchor_preference = brain.embed(
+            "I prefer, I like, my favorite, I enjoy, I want, preference, likes, dislikes, choose",
+        )?;
+        brain.anchor_relationship = brain.embed(
+            "is my, works at, knows, colleague, friend, family, partner, relationship, connected to",
+        )?;
+        brain.anchor_event = brain.embed(
+            "meeting, appointment, event, happening, tomorrow, next week, on date, scheduled for, calendar",
         )?;
 
         // Action anchors: what does the agent want to do?
@@ -204,15 +323,14 @@ impl Brain {
         // Extract values for caching
         let values: Vec<f32> = embedding.squeeze(0)?.to_vec1()?;
 
-        // Cache with LRU eviction
+        // Cache with LRU eviction (O(1) removal from front with VecDeque)
         if self.cache_order.len() >= EMBEDDING_CACHE_SIZE {
-            if let Some(oldest) = self.cache_order.first().cloned() {
+            if let Some(oldest) = self.cache_order.pop_front() {
                 self.embedding_cache.remove(&oldest);
-                self.cache_order.remove(0);
             }
         }
         self.embedding_cache.insert(text.to_string(), values);
-        self.cache_order.push(text.to_string());
+        self.cache_order.push_back(text.to_string());
 
         Ok(embedding)
     }
@@ -277,8 +395,9 @@ impl Brain {
 
     /// Classifies the full intent of an input embedding vector
     ///
-    /// Returns both the action (Store/Query) and data type (Task/Memory)
+    /// Returns both the action (Store/Query) and data type (Task/Memory/Preference/Relationship/Event)
     /// by comparing against pre-computed anchor vectors.
+    /// Also returns confidence scores for cloud-ready stateless operation.
     pub fn classify(&self, input_vec: &Tensor) -> Result<Intent> {
         // Determine action: Store or Query?
         let score_store = input_vec
@@ -290,47 +409,63 @@ impl Brain {
             .sum_all()?
             .to_scalar::<f32>()?;
 
-        let action = if score_query > score_store {
-            Action::Query
+        let (action, action_confidence) = if score_query > score_store {
+            (Action::Query, (score_query - score_store).abs())
         } else {
-            Action::Store
+            (Action::Store, (score_store - score_query).abs())
         };
 
-        // Determine data type: Task or Memory?
-        let score_task = input_vec
-            .mul(&self.anchor_task)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
-        let score_memory = input_vec
-            .mul(&self.anchor_memory)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
+        // Determine data type by comparing against all category anchors
+        let scores = [
+            (DataType::Task, input_vec.mul(&self.anchor_task)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Memory, input_vec.mul(&self.anchor_memory)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Preference, input_vec.mul(&self.anchor_preference)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Relationship, input_vec.mul(&self.anchor_relationship)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Event, input_vec.mul(&self.anchor_event)?.sum_all()?.to_scalar::<f32>()?),
+        ];
 
-        let data_type = if score_task > score_memory {
-            DataType::Task
-        } else {
-            DataType::Memory
-        };
+        // Find the highest scoring data type
+        let (best_type, best_score) = scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(dt, s)| (*dt, *s))
+            .unwrap_or((DataType::Memory, 0.0));
 
-        Ok(Intent { action, data_type })
+        // Find the second highest score for confidence calculation
+        let second_best_score = scores
+            .iter()
+            .filter(|(dt, _)| *dt != best_type)
+            .map(|(_, s)| *s)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0);
+
+        let data_type_confidence = (best_score - second_best_score).abs();
+
+        Ok(Intent {
+            action,
+            data_type: best_type,
+            action_confidence,
+            data_type_confidence,
+        })
     }
 
-    /// Classifies only the data type (Task/Memory) - for backward compatibility
+    /// Classifies only the data type - returns the best matching category
     pub fn classify_data_type(&self, input_vec: &Tensor) -> Result<DataType> {
-        let score_task = input_vec
-            .mul(&self.anchor_task)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
-        let score_memory = input_vec
-            .mul(&self.anchor_memory)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
+        let scores = [
+            (DataType::Task, input_vec.mul(&self.anchor_task)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Memory, input_vec.mul(&self.anchor_memory)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Preference, input_vec.mul(&self.anchor_preference)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Relationship, input_vec.mul(&self.anchor_relationship)?.sum_all()?.to_scalar::<f32>()?),
+            (DataType::Event, input_vec.mul(&self.anchor_event)?.sum_all()?.to_scalar::<f32>()?),
+        ];
 
-        if score_task > score_memory {
-            Ok(DataType::Task)
-        } else {
-            Ok(DataType::Memory)
-        }
+        let (best_type, _) = scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(dt, s)| (*dt, *s))
+            .unwrap_or((DataType::Memory, 0.0));
+
+        Ok(best_type)
     }
 
     /// Classifies only the action (Store/Query)
@@ -354,6 +489,29 @@ impl Brain {
     /// Returns the embedding dimension (384 for MiniLM)
     pub fn embedding_dim(&self) -> usize {
         384
+    }
+
+    /// Generates embeddings for multiple texts in batch
+    ///
+    /// More efficient than calling embed() multiple times for bulk operations.
+    /// Returns vectors in the same order as input texts.
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut results = Vec::with_capacity(texts.len());
+
+        for text in texts {
+            let embedding = self.embed(text)?;
+            let values: Vec<f32> = embedding.squeeze(0)?.to_vec1()?;
+            results.push(values);
+        }
+
+        Ok(results)
+    }
+
+    /// Generates embeddings and returns as raw f32 vectors (skips tensor creation for results)
+    pub fn embed_to_vec(&mut self, text: &str) -> Result<Vec<f32>> {
+        let embedding = self.embed(text)?;
+        let values: Vec<f32> = embedding.squeeze(0)?.to_vec1()?;
+        Ok(values)
     }
 }
 

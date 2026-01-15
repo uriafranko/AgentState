@@ -79,10 +79,7 @@ fn run_demo(engine: &mut AgentEngine) {
         match engine.process(example) {
             Ok(response) => {
                 if let AgentResponse::Stored { data_type, latency_ms, .. } = &response {
-                    let type_str = match data_type {
-                        DataType::Task => "TASK",
-                        DataType::Memory => "MEMORY",
-                    };
+                    let type_str = data_type.as_category().to_uppercase();
                     println!("   '{}'\n   -> Stored as {} ({:.1}ms)", example, type_str, latency_ms);
                 }
             }
@@ -259,10 +256,7 @@ fn print_response(response: &AgentResponse) {
             content,
             latency_ms,
         } => {
-            let type_str = match data_type {
-                DataType::Task => "TASK",
-                DataType::Memory => "MEMORY",
-            };
+            let type_str = data_type.as_category().to_uppercase();
             if show_latency {
                 println!("Stored [{}] as {} (id: {}) [{:.1}ms]", content, type_str, id, latency_ms);
             } else {
@@ -276,9 +270,8 @@ fn print_response(response: &AgentResponse) {
             latency_ms,
         } => {
             let filter = match data_type {
-                Some(DataType::Task) => " (tasks only)",
-                Some(DataType::Memory) => " (memories only)",
-                None => "",
+                Some(dt) => format!(" ({} only)", dt.as_category()),
+                None => String::new(),
             };
             if show_latency {
                 println!("Found {} result(s){} [{:.1}ms]:", count, filter, latency_ms);
@@ -294,6 +287,21 @@ fn print_response(response: &AgentResponse) {
                 println!("No results found for: '{}' [{:.1}ms]", query, latency_ms);
             } else {
                 println!("No results found for: '{}'", query);
+            }
+        }
+        AgentResponse::NeedsClarification {
+            original_input,
+            message,
+            detected_intent,
+            latency_ms,
+        } => {
+            println!("Clarification needed for: '{}'", original_input);
+            println!("  {}", message);
+            if show_latency {
+                println!("  [Confidence: action={:.1}%, type={:.1}%] [{:.1}ms]",
+                    detected_intent.action_confidence * 100.0,
+                    detected_intent.data_type_confidence * 100.0,
+                    latency_ms);
             }
         }
     }
@@ -370,11 +378,14 @@ fn handle_classify(engine: &mut AgentEngine, text: &str) {
                 agent_brain::Action::Store => "STORE",
                 agent_brain::Action::Query => "QUERY",
             };
-            let data_type = match intent.data_type {
-                DataType::Task => "TASK",
-                DataType::Memory => "MEMORY",
-            };
+            let data_type = intent.data_type.as_category().to_uppercase();
             println!("Intent: {} as {}", action, data_type);
+            println!("  Confidence: action={:.1}%, type={:.1}%",
+                intent.action_confidence * 100.0,
+                intent.data_type_confidence * 100.0);
+            if intent.is_ambiguous() {
+                println!("  ⚠ Ambiguous - would request clarification");
+            }
         }
         Err(e) => println!("Error: {}", e),
     }
