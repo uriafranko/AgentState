@@ -1,0 +1,14 @@
+# CPU Optimization Configuration
+# Enables native CPU features (AVX, AVX2, SSE4.2, etc.) for maximum performance
+# This can provide 2-3x speedup for embedding generation
+
+[build]
+# Use native CPU features for optimal SIMD performance
+rustflags = ["-C", "target-cpu=native"]
+
+# Environment variables for optimal performance
+[env]
+# Enable OpenMP parallelism for ONNX Runtime
+OMP_NUM_THREADS = "4"
+# Disable tokenizer parallelism (can cause issues with ONNX)
+TOKENIZERS_PARALLELISM = "false"

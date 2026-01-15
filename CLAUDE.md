@@ -185,36 +185,98 @@ cargo run --release --example demo
 
 ### Model Loading
 
-The MiniLM model can be loaded from:
-1. **Local files** (preferred): `packages/agent-state-rs/models/minilm/` directory
-2. **HuggingFace Hub**: Downloads automatically (~90MB, cached in `~/.cache/huggingface`)
+Models can be loaded from:
+1. **Local files** (preferred): `packages/agent-state-rs/models/<model-name>/` directory
+2. **HuggingFace Hub**: Downloads automatically (~90MB per model, cached in `~/.cache/huggingface`)
 
-To use local model (faster startup, works offline):
+**No API key required** - all models are public and downloaded directly.
+
+To use local models (faster startup, works offline):
 ```bash
 cd packages/agent-state-rs
-mkdir -p models/minilm
-curl -L -o models/minilm/config.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
-curl -L -o models/minilm/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-curl -L -o models/minilm/model.safetensors "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+
+# BGE-Small (default, recommended)
+mkdir -p models/bge-small
+curl -L -o models/bge-small/config.json "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/config.json"
+curl -L -o models/bge-small/tokenizer.json "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json"
+curl -L -o models/bge-small/model.safetensors "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/model.safetensors"
+
+# MiniLM-L6 (fast mode)
+mkdir -p models/minilm-l6
+curl -L -o models/minilm-l6/config.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
+curl -L -o models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+curl -L -o models/minilm-l6/model.safetensors "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+
+# BGE-Base (most accurate, 768 dims)
+mkdir -p models/bge-base
+curl -L -o models/bge-base/config.json "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json"
+curl -L -o models/bge-base/tokenizer.json "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json"
+curl -L -o models/bge-base/model.safetensors "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/model.safetensors"
 ```
 
 ## Key Components (Rust Core)
 
 - **Brain** (`packages/agent-state-rs/src/brain.rs`):
-  - Loads MiniLM model (384-dim embeddings)
+  - Supports multiple embedding models (see below)
+  - Supports multiple backends (Candle, ONNX)
   - Classifies **Action** (Store vs Query)
-  - Classifies **DataType** (Task vs Memory)
+  - Classifies **DataType** (Task vs Memory vs Preference vs Relationship vs Event)
   - Uses zero-shot classification via anchor vectors
 
 - **Storage** (`packages/agent-state-rs/src/storage.rs`):
   - SQLite with blob vector storage
   - Cosine similarity search
   - Category-filtered queries
+  - Supports dynamic embedding dimensions
 
 - **AgentEngine** (`packages/agent-state-rs/src/lib.rs`):
   - `process()` - The unified API (auto-routes by intent)
   - `store()` / `search()` - Explicit methods when needed
   - Returns `AgentResponse` for structured handling
+
+### Available Embedding Models
+
+| Model | Dimensions | MTEB Score | Notes |
+|-------|------------|------------|-------|
+| `MiniLmL6` | 384 | 56.3 | Fast, resource-constrained |
+| `MiniLmL12` | 384 | 59.8 | Better accuracy, same dims |
+| `BgeSmall` | 384 | 62.2 | **Best small model (default)** |
+| `BgeBase` | 768 | 64.2 | **Best accuracy overall** |
+| `E5Small` | 384 | 61.5 | Good alternative to BGE |
+| `GteSmall` | 384 | 61.4 | Competitive small model |
+
+### Backends
+
+- **Candle** (default): Pure Rust, no external dependencies
+- **ONNX Runtime**: Faster inference, better CPU optimization (requires `--features onnx-backend`)
+
+### Selecting a Model
+
+```rust
+use agent_brain::{AgentEngine, EmbeddingModel, Backend};
+
+// Default: BGE-Small with Candle backend
+let engine = AgentEngine::new("agent.db")?;
+
+// Builder pattern for customization
+let engine = AgentEngine::builder()
+    .db_path("agent.db")
+    .model(EmbeddingModel::BgeBase)  // Most accurate (768 dims)
+    .backend(Backend::Candle)
+    .build()?;
+
+// In-memory database for testing
+let engine = AgentEngine::builder()
+    .in_memory()
+    .model(EmbeddingModel::MiniLmL6)  // Fast model
+    .build()?;
+
+// Mock mode (no ML model needed)
+let engine = AgentEngine::builder()
+    .in_memory()
+    .mock()
+    .build()?;
+```
 
 ### Intent Classification
 
