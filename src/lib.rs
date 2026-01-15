@@ -14,7 +14,7 @@
 //! ```no_run
 //! use agent_brain::AgentEngine;
 //!
-//! let engine = AgentEngine::new("my_agent.db").unwrap();
+//! let mut engine = AgentEngine::new("my_agent.db").unwrap();
 //!
 //! // Add information - automatically classified
 //! engine.add("Remind me to buy milk").unwrap(); // -> Task
@@ -95,7 +95,7 @@ impl AgentEngine {
     /// # Example
     /// ```no_run
     /// # use agent_brain::AgentEngine;
-    /// # let engine = AgentEngine::new(":memory:").unwrap();
+    /// # let mut engine = AgentEngine::new(":memory:").unwrap();
     /// let result = engine.add("Remind me to call mom").unwrap();
     /// assert_eq!(result, "processed_as_task");
     /// ```
