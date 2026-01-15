@@ -32,3 +32,12 @@ path = "src/main.rs"
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# For maximum performance on your CPU (uncomment if needed)
+# [profile.release.build-override]
+# opt-level = 3

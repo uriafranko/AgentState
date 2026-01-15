@@ -97,11 +97,59 @@ cargo check 2>&1 | head -50
 ### Running the Application
 
 ```bash
-# Build and run
+# Build and run (debug - slow, for development only)
 cargo run
 
-# Build release version
+# Build and run release version (ALWAYS use for real workloads)
+cargo run --release
+
+# Build release binary
 cargo build --release
+```
+
+## Performance
+
+### CRITICAL: Always Use Release Mode
+
+Debug mode is **17x slower** than release mode. Never use debug mode for real workloads.
+
+| Mode | Time per Embedding | Use Case |
+|------|-------------------|----------|
+| Debug | ~1600ms | Development/debugging only |
+| Release | ~88ms | Production, demos, testing |
+| Cached | ~0ms | Repeated queries (instant) |
+
+### Embedding Cache
+
+The Brain includes an LRU cache (1000 entries) for embeddings:
+- First query: ~88ms (computes embedding)
+- Repeated query: ~0ms (cache hit)
+
+```rust
+// Cache is automatic, but you can manage it:
+engine.brain.cache_size()    // Current cache entries
+engine.brain.clear_cache()   // Clear if needed
+```
+
+### Running the Demo
+
+```bash
+# Run demo with optimizations (required for reasonable performance)
+cargo run --release --example demo
+```
+
+### Model Loading
+
+The MiniLM model can be loaded from:
+1. **Local files** (preferred): `models/minilm/` directory
+2. **HuggingFace Hub**: Downloads automatically (~90MB, cached in `~/.cache/huggingface`)
+
+To use local model (faster startup, works offline):
+```bash
+mkdir -p models/minilm
+curl -L -o models/minilm/config.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
+curl -L -o models/minilm/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+curl -L -o models/minilm/model.safetensors "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
 ```
 
 ## Architecture Overview

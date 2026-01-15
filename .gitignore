@@ -24,6 +24,9 @@ Thumbs.db
 # HuggingFace cache (models are downloaded here)
 # ~/.cache/huggingface/ - this is in home dir, not project
 
+# Local model files (large binaries, download separately)
+/models/
+
 # Backup files
 *.bak
 *~
