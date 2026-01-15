@@ -2,9 +2,12 @@
 //!
 //! This module manages the SQLite database for storing knowledge items (tasks and memories)
 //! along with their embedding vectors for semantic search.
+//!
+//! Also handles structured data storage with schema-based validation.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, Transaction};
+use std::collections::HashMap;
 
 /// Time-based filter for queries
 ///
@@ -221,6 +224,52 @@ impl Storage {
             [],
         )
         .context("Failed to create relationships type index")?;
+
+        // Create schemas table for storing schema definitions
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schemas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                definition TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .context("Failed to create schemas table")?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_schemas_name ON schemas(name)",
+            [],
+        )
+        .context("Failed to create schemas name index")?;
+
+        // Create structured_data table for storing extracted structured fields
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS structured_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                knowledge_id INTEGER NOT NULL,
+                schema_name TEXT NOT NULL,
+                fields_json TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .context("Failed to create structured_data table")?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_structured_data_knowledge_id ON structured_data(knowledge_id)",
+            [],
+        )
+        .context("Failed to create structured_data knowledge_id index")?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_structured_data_schema ON structured_data(schema_name)",
+            [],
+        )
+        .context("Failed to create structured_data schema index")?;
 
         Ok(Self { conn })
     }
@@ -510,6 +559,8 @@ impl Storage {
     /// Clears all data from the database
     pub fn clear(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM structured_data", [])?;
+        tx.execute("DELETE FROM schemas", [])?;
         tx.execute("DELETE FROM relationships", [])?;
         tx.execute("DELETE FROM entities", [])?;
         tx.execute("DELETE FROM vectors", [])?;
@@ -685,6 +736,235 @@ impl Storage {
         }
 
         Ok(linked_count)
+    }
+
+    // =========================================================================
+    // SCHEMA METHODS - For structured data support
+    // =========================================================================
+
+    /// Saves a schema definition to the database
+    ///
+    /// # Arguments
+    /// * `name` - Unique name for the schema
+    /// * `definition_json` - JSON representation of the schema
+    pub fn save_schema(&mut self, name: &str, definition_json: &str) -> Result<i64> {
+        // Use INSERT OR REPLACE to handle updates
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schemas (name, definition, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)",
+            params![name, definition_json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Gets a schema by name
+    pub fn get_schema(&self, name: &str) -> Result<Option<String>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT definition FROM schemas WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        ).ok();
+        Ok(result)
+    }
+
+    /// Lists all schema names
+    pub fn list_schemas(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT name FROM schemas ORDER BY name")?;
+        let names = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(names)
+    }
+
+    /// Deletes a schema by name
+    pub fn delete_schema(&mut self, name: &str) -> Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM schemas WHERE name = ?1",
+            params![name],
+        )?;
+        Ok(affected > 0)
+    }
+
+    // =========================================================================
+    // STRUCTURED DATA METHODS
+    // =========================================================================
+
+    /// Saves structured data linked to a knowledge item
+    ///
+    /// # Arguments
+    /// * `knowledge_id` - The ID of the parent knowledge item
+    /// * `schema_name` - Name of the schema this data conforms to
+    /// * `fields_json` - JSON object of field name -> value
+    /// * `confidence` - Extraction confidence (0.0 to 1.0)
+    pub fn save_structured_data(
+        &mut self,
+        knowledge_id: i64,
+        schema_name: &str,
+        fields_json: &str,
+        confidence: f32,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO structured_data (knowledge_id, schema_name, fields_json, confidence)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![knowledge_id, schema_name, fields_json, confidence],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Gets structured data for a knowledge item
+    pub fn get_structured_data(&self, knowledge_id: i64) -> Result<Option<StructuredDataItem>> {
+        let result = self.conn.query_row(
+            "SELECT id, schema_name, fields_json, confidence FROM structured_data
+             WHERE knowledge_id = ?1",
+            params![knowledge_id],
+            |row| {
+                Ok(StructuredDataItem {
+                    id: row.get(0)?,
+                    knowledge_id,
+                    schema_name: row.get(1)?,
+                    fields_json: row.get(2)?,
+                    confidence: row.get(3)?,
+                })
+            },
+        ).ok();
+        Ok(result)
+    }
+
+    /// Gets all structured data for a schema type
+    pub fn get_structured_by_schema(&self, schema_name: &str) -> Result<Vec<StructuredDataItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sd.id, sd.knowledge_id, sd.schema_name, sd.fields_json, sd.confidence
+             FROM structured_data sd
+             WHERE sd.schema_name = ?1
+             ORDER BY sd.id DESC"
+        )?;
+
+        let items = stmt
+            .query_map(params![schema_name], |row| {
+                Ok(StructuredDataItem {
+                    id: row.get(0)?,
+                    knowledge_id: row.get(1)?,
+                    schema_name: row.get(2)?,
+                    fields_json: row.get(3)?,
+                    confidence: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Searches structured data by field value
+    ///
+    /// Uses JSON extraction to search within the fields_json column.
+    pub fn search_structured_by_field(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        field_value: &str,
+    ) -> Result<Vec<StructuredDataItem>> {
+        // SQLite json_extract for searching within JSON
+        let mut stmt = self.conn.prepare(
+            "SELECT sd.id, sd.knowledge_id, sd.schema_name, sd.fields_json, sd.confidence
+             FROM structured_data sd
+             WHERE sd.schema_name = ?1
+               AND json_extract(sd.fields_json, '$.' || ?2) LIKE '%' || ?3 || '%'
+             ORDER BY sd.id DESC"
+        )?;
+
+        let items = stmt
+            .query_map(params![schema_name, field_name, field_value], |row| {
+                Ok(StructuredDataItem {
+                    id: row.get(0)?,
+                    knowledge_id: row.get(1)?,
+                    schema_name: row.get(2)?,
+                    fields_json: row.get(3)?,
+                    confidence: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Gets structured data with the associated knowledge content
+    pub fn get_structured_with_content(&self, schema_name: &str) -> Result<Vec<(StructuredDataItem, KnowledgeItem)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sd.id, sd.knowledge_id, sd.schema_name, sd.fields_json, sd.confidence,
+                    k.id, k.content, k.category, k.created_at
+             FROM structured_data sd
+             JOIN knowledge k ON k.id = sd.knowledge_id
+             WHERE sd.schema_name = ?1
+             ORDER BY sd.id DESC"
+        )?;
+
+        let items = stmt
+            .query_map(params![schema_name], |row| {
+                Ok((
+                    StructuredDataItem {
+                        id: row.get(0)?,
+                        knowledge_id: row.get(1)?,
+                        schema_name: row.get(2)?,
+                        fields_json: row.get(3)?,
+                        confidence: row.get(4)?,
+                    },
+                    KnowledgeItem {
+                        id: row.get(5)?,
+                        content: row.get(6)?,
+                        category: row.get(7)?,
+                        created_at: row.get(8)?,
+                    },
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Counts structured data items by schema
+    pub fn count_structured_by_schema(&self, schema_name: &str) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM structured_data WHERE schema_name = ?1",
+            params![schema_name],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Deletes structured data by knowledge ID
+    pub fn delete_structured_data(&mut self, knowledge_id: i64) -> Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM structured_data WHERE knowledge_id = ?1",
+            params![knowledge_id],
+        )?;
+        Ok(affected > 0)
+    }
+}
+
+/// A stored structured data item
+#[derive(Debug, Clone)]
+pub struct StructuredDataItem {
+    pub id: i64,
+    pub knowledge_id: i64,
+    pub schema_name: String,
+    pub fields_json: String,
+    pub confidence: f32,
+}
+
+impl StructuredDataItem {
+    /// Parses the fields_json into a HashMap
+    pub fn fields(&self) -> Result<HashMap<String, String>> {
+        serde_json::from_str(&self.fields_json)
+            .context("Failed to parse structured data fields")
+    }
+
+    /// Gets a specific field value
+    pub fn get_field(&self, name: &str) -> Option<String> {
+        self.fields().ok()?.get(name).cloned()
     }
 }
 

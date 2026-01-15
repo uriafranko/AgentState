@@ -18,6 +18,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "hf-hub",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

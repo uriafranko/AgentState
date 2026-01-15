@@ -36,12 +36,17 @@
 mod brain;
 pub mod federation;
 pub mod metrics;
+pub mod schema;
 mod storage;
 
 pub use brain::{Action, Brain, DataType, Intent};
 pub use federation::{FederatedEngine, FederationConfig};
 pub use metrics::{Metrics, Operation, OperationStats};
-pub use storage::{KnowledgeItem, Storage, TimeFilter};
+pub use schema::{
+    ExtractedData, Extractor, FieldDefinition, FieldType, Schema, SchemaRegistry,
+    ValidationResult, contact_schema, event_schema, note_schema, task_schema,
+};
+pub use storage::{KnowledgeItem, Storage, StructuredDataItem, TimeFilter};
 
 use anyhow::{Context, Result};
 use std::time::Instant;
@@ -150,6 +155,111 @@ impl AgentResponse {
     }
 }
 
+/// Response from storing structured data
+#[derive(Debug, Clone)]
+pub struct StructuredResponse {
+    /// The ID of the stored item
+    pub id: i64,
+    /// The schema that was used
+    pub schema_name: String,
+    /// The extracted structured data
+    pub extracted_data: ExtractedData,
+    /// Validation result
+    pub validation: ValidationResult,
+    /// Latency of this operation in milliseconds
+    pub latency_ms: f64,
+}
+
+impl StructuredResponse {
+    /// Returns true if extraction and validation were successful
+    pub fn is_valid(&self) -> bool {
+        self.validation.is_valid
+    }
+
+    /// Returns true if all required fields were extracted
+    pub fn is_complete(&self) -> bool {
+        self.extracted_data.is_complete()
+    }
+
+    /// Gets an extracted field value
+    pub fn get_field(&self, name: &str) -> Option<&String> {
+        self.extracted_data.get(name)
+    }
+
+    /// Gets all extracted fields
+    pub fn fields(&self) -> &std::collections::HashMap<String, String> {
+        &self.extracted_data.fields
+    }
+
+    /// Returns the extraction confidence (0.0 to 1.0)
+    pub fn confidence(&self) -> f32 {
+        self.extracted_data.confidence
+    }
+
+    /// Returns missing required fields
+    pub fn missing_fields(&self) -> &[String] {
+        &self.extracted_data.missing_fields
+    }
+
+    /// Converts to agent-friendly string
+    pub fn to_agent_string(&self) -> String {
+        if self.is_valid() {
+            let fields: Vec<String> = self.extracted_data.fields
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            format!(
+                "Stored {} (confidence: {:.0}%): {}",
+                self.schema_name,
+                self.confidence() * 100.0,
+                fields.join(", ")
+            )
+        } else {
+            let mut issues = Vec::new();
+            if !self.extracted_data.missing_fields.is_empty() {
+                issues.push(format!("Missing: {}", self.extracted_data.missing_fields.join(", ")));
+            }
+            for (field, error) in &self.validation.errors {
+                issues.push(format!("{}: {}", field, error));
+            }
+            format!("Partial {} stored with issues: {}", self.schema_name, issues.join("; "))
+        }
+    }
+}
+
+/// Result of processing with schema detection
+#[derive(Debug)]
+pub enum ProcessedWithSchema {
+    /// Structured data was extracted and stored
+    Structured(StructuredResponse),
+    /// Regular processing (no schema matched)
+    Regular(AgentResponse),
+}
+
+impl ProcessedWithSchema {
+    /// Returns the knowledge item ID if stored
+    pub fn id(&self) -> Option<i64> {
+        match self {
+            ProcessedWithSchema::Structured(r) => Some(r.id),
+            ProcessedWithSchema::Regular(AgentResponse::Stored { id, .. }) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this was structured data
+    pub fn is_structured(&self) -> bool {
+        matches!(self, ProcessedWithSchema::Structured(_))
+    }
+
+    /// Converts to agent-friendly string
+    pub fn to_agent_string(&self) -> String {
+        match self {
+            ProcessedWithSchema::Structured(r) => r.to_agent_string(),
+            ProcessedWithSchema::Regular(r) => r.to_agent_string(),
+        }
+    }
+}
+
 /// The main Agent Engine - a semantic state manager for AI agents
 ///
 /// This is the primary interface. Agents interact through a single `process()`
@@ -158,6 +268,7 @@ pub struct AgentEngine {
     brain: Brain,
     storage: Storage,
     metrics: Metrics,
+    schema_registry: SchemaRegistry,
 }
 
 impl AgentEngine {
@@ -171,7 +282,8 @@ impl AgentEngine {
         let brain = Brain::new().context("Failed to initialize Brain")?;
         let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
         let metrics = Metrics::new();
-        Ok(Self { brain, storage, metrics })
+        let schema_registry = SchemaRegistry::new();
+        Ok(Self { brain, storage, metrics, schema_registry })
     }
 
     /// Creates an AgentEngine with an in-memory database (useful for testing)
@@ -184,7 +296,8 @@ impl AgentEngine {
         let brain = Brain::new().context("Failed to initialize Brain")?;
         let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
         let metrics = Metrics::disabled();
-        Ok(Self { brain, storage, metrics })
+        let schema_registry = SchemaRegistry::new();
+        Ok(Self { brain, storage, metrics, schema_registry })
     }
 
     /// Creates an AgentEngine in mock mode for testing
@@ -195,7 +308,8 @@ impl AgentEngine {
         let brain = Brain::new_mock().context("Failed to initialize mock Brain")?;
         let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
         let metrics = Metrics::new();
-        Ok(Self { brain, storage, metrics })
+        let schema_registry = SchemaRegistry::new();
+        Ok(Self { brain, storage, metrics, schema_registry })
     }
 
     /// Creates an in-memory AgentEngine in mock mode for testing
@@ -682,6 +796,227 @@ impl AgentEngine {
     pub fn classify(&mut self, text: &str) -> Result<Intent> {
         let vector = self.brain.embed(text)?;
         self.brain.classify(&vector)
+    }
+
+    // =========================================================================
+    // STRUCTURED DATA API - Schema-based extraction and validation
+    // =========================================================================
+
+    /// Registers a schema for structured data extraction
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use agent_brain::{AgentEngine, Schema, FieldType};
+    /// # let mut engine = AgentEngine::new(":memory:").unwrap();
+    /// let contact = Schema::new("contact")
+    ///     .field("name", FieldType::String)
+    ///     .field("email", FieldType::Email)
+    ///     .optional_field("company", FieldType::String);
+    ///
+    /// engine.register_schema(contact).unwrap();
+    /// ```
+    pub fn register_schema(&mut self, schema: Schema) -> Result<()> {
+        // Save to database for persistence
+        let json = schema.to_json()?;
+        self.storage.save_schema(&schema.name, &json)?;
+        // Also keep in memory for fast access
+        self.schema_registry.register(schema);
+        Ok(())
+    }
+
+    /// Gets a registered schema by name
+    pub fn get_schema(&self, name: &str) -> Option<&Schema> {
+        self.schema_registry.get(name)
+    }
+
+    /// Lists all registered schema names
+    pub fn list_schemas(&self) -> Vec<&str> {
+        self.schema_registry.list()
+    }
+
+    /// Unregisters a schema
+    pub fn unregister_schema(&mut self, name: &str) -> Result<bool> {
+        self.schema_registry.unregister(name);
+        self.storage.delete_schema(name)
+    }
+
+    /// Stores content with structured data extraction
+    ///
+    /// Extracts fields from natural language based on the specified schema,
+    /// stores both the raw content and the structured data.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use agent_brain::{AgentEngine, Schema, FieldType, contact_schema};
+    /// # let mut engine = AgentEngine::new_mock(":memory:").unwrap();
+    /// engine.register_schema(contact_schema()).unwrap();
+    ///
+    /// let response = engine.store_structured(
+    ///     "Add John Smith, email john@example.com, works at Acme",
+    ///     "contact"
+    /// ).unwrap();
+    /// ```
+    pub fn store_structured(&mut self, content: &str, schema_name: &str) -> Result<StructuredResponse> {
+        let total_start = Instant::now();
+
+        // Get the schema
+        let schema = self.schema_registry.get(schema_name)
+            .ok_or_else(|| anyhow::anyhow!("Schema '{}' not found", schema_name))?
+            .clone();
+
+        // Extract structured data
+        let extracted = Extractor::extract(content, &schema);
+
+        // Validate the extraction
+        let validation = Extractor::validate(&extracted, &schema);
+
+        // Generate embedding and classify
+        let embed_start = Instant::now();
+        let vector_tensor = self.brain.embed(content)?;
+        self.metrics.record(Operation::Embed, embed_start.elapsed());
+
+        let classify_start = Instant::now();
+        let data_type = self.brain.classify_data_type(&vector_tensor)?;
+        self.metrics.record(Operation::Classify, classify_start.elapsed());
+
+        let vector_flat: Vec<f32> = vector_tensor.flatten_all()?.to_vec1()?;
+
+        // Store the raw content
+        let db_start = Instant::now();
+        let knowledge_id = self.storage.save(content, data_type.as_category(), &vector_flat)?;
+        self.metrics.record(Operation::DbSave, db_start.elapsed());
+
+        // Store the structured data
+        let fields_json = extracted.fields_to_json()?;
+        self.storage.save_structured_data(
+            knowledge_id,
+            schema_name,
+            &fields_json,
+            extracted.confidence,
+        )?;
+
+        let latency_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record(Operation::Store, total_start.elapsed());
+
+        Ok(StructuredResponse {
+            id: knowledge_id,
+            schema_name: schema_name.to_string(),
+            extracted_data: extracted,
+            validation,
+            latency_ms,
+        })
+    }
+
+    /// Queries structured data by schema and optional field filters
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use agent_brain::{AgentEngine, contact_schema};
+    /// # let mut engine = AgentEngine::new_mock(":memory:").unwrap();
+    /// engine.register_schema(contact_schema()).unwrap();
+    ///
+    /// // Get all contacts
+    /// let contacts = engine.query_structured("contact", None).unwrap();
+    ///
+    /// // Filter by field value
+    /// let acme_contacts = engine.query_structured("contact", Some(("company", "Acme"))).unwrap();
+    /// ```
+    pub fn query_structured(
+        &self,
+        schema_name: &str,
+        field_filter: Option<(&str, &str)>,
+    ) -> Result<Vec<StructuredDataItem>> {
+        if let Some((field, value)) = field_filter {
+            self.storage.search_structured_by_field(schema_name, field, value)
+        } else {
+            self.storage.get_structured_by_schema(schema_name)
+        }
+    }
+
+    /// Queries structured data with the original content
+    pub fn query_structured_with_content(
+        &self,
+        schema_name: &str,
+    ) -> Result<Vec<(StructuredDataItem, KnowledgeItem)>> {
+        self.storage.get_structured_with_content(schema_name)
+    }
+
+    /// Gets structured data for a specific knowledge item
+    pub fn get_structured(&self, knowledge_id: i64) -> Result<Option<StructuredDataItem>> {
+        self.storage.get_structured_data(knowledge_id)
+    }
+
+    /// Counts structured data items by schema
+    pub fn count_structured(&self, schema_name: &str) -> Result<usize> {
+        self.storage.count_structured_by_schema(schema_name)
+    }
+
+    /// Processes natural language with automatic schema detection
+    ///
+    /// If the input matches a registered schema pattern, extracts structured data.
+    /// Otherwise, falls back to regular processing.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use agent_brain::{AgentEngine, contact_schema};
+    /// # let mut engine = AgentEngine::new_mock(":memory:").unwrap();
+    /// engine.register_schema(contact_schema()).unwrap();
+    ///
+    /// // This will auto-detect as a contact and extract fields
+    /// let response = engine.process_with_schema_detection(
+    ///     "Add contact: John at john@example.com"
+    /// ).unwrap();
+    /// ```
+    pub fn process_with_schema_detection(&mut self, input: &str) -> Result<ProcessedWithSchema> {
+        let input_lower = input.to_lowercase();
+
+        // Try to detect which schema best matches the input
+        let mut best_match: Option<(String, f32)> = None;
+
+        for schema_name in self.schema_registry.list() {
+            if let Some(schema) = self.schema_registry.get(schema_name) {
+                // Try extraction and use confidence as match score
+                let extracted = Extractor::extract(input, schema);
+                if extracted.confidence > 0.5 {
+                    if best_match.as_ref().map_or(true, |(_, c)| extracted.confidence > *c) {
+                        best_match = Some((schema_name.to_string(), extracted.confidence));
+                    }
+                }
+            }
+        }
+
+        // Also check for explicit schema hints in the input
+        for schema_name in self.schema_registry.list() {
+            if input_lower.contains(schema_name) {
+                best_match = Some((schema_name.to_string(), 1.0));
+                break;
+            }
+        }
+
+        if let Some((schema_name, _)) = best_match {
+            let structured_response = self.store_structured(input, &schema_name)?;
+            Ok(ProcessedWithSchema::Structured(structured_response))
+        } else {
+            let response = self.process(input)?;
+            Ok(ProcessedWithSchema::Regular(response))
+        }
+    }
+
+    /// Loads schemas from the database (call on startup to restore persisted schemas)
+    pub fn load_schemas_from_db(&mut self) -> Result<usize> {
+        let schema_names = self.storage.list_schemas()?;
+        let mut loaded = 0;
+
+        for name in schema_names {
+            if let Ok(Some(json)) = self.storage.get_schema(&name) {
+                if let Ok(schema) = Schema::from_json(&json) {
+                    self.schema_registry.register(schema);
+                    loaded += 1;
+                }
+            }
+        }
+
+        Ok(loaded)
     }
 
     // =========================================================================

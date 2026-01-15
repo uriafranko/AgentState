@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use std::collections::HashMap;
 use agent_brain::{
     AgentEngine as RustEngine,
     AgentResponse as RustResponse,
@@ -12,6 +13,11 @@ use agent_brain::{
     Action as RustAction,
     Intent as RustIntent,
     TimeFilter as RustTimeFilter,
+    Schema as RustSchema,
+    FieldType as RustFieldType,
+    FieldDefinition as RustFieldDefinition,
+    StructuredResponse as RustStructuredResponse,
+    StructuredDataItem as RustStructuredDataItem,
 };
 
 /// Convert Rust errors to Python exceptions
@@ -31,12 +37,17 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QueryResultResponse>()?;
     m.add_class::<NotFoundResponse>()?;
     m.add_class::<NeedsClarificationResponse>()?;
+    // Structured data types
+    m.add_class::<FieldType>()?;
+    m.add_class::<Schema>()?;
+    m.add_class::<StructuredResponse>()?;
+    m.add_class::<StructuredDataItem>()?;
     Ok(())
 }
 
 /// Type of data being stored or queried
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DataType {
     /// Action items, reminders, todos
     Task,
@@ -97,8 +108,8 @@ impl DataType {
 }
 
 /// The action the agent wants to perform
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Store information
     Store,
@@ -135,8 +146,8 @@ impl Action {
 }
 
 /// Time filter for queries
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TimeFilter {
     /// No time filtering
     All,
@@ -405,6 +416,263 @@ fn convert_response(resp: RustResponse) -> AgentResponseEnum {
     }
 }
 
+// ============================================================================
+// STRUCTURED DATA TYPES
+// ============================================================================
+
+/// Field type for schema definitions
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldType {
+    /// Plain text string
+    String,
+    /// Email address (validated)
+    Email,
+    /// Phone number
+    Phone,
+    /// Date
+    Date,
+    /// Integer
+    Integer,
+    /// Float
+    Float,
+    /// Boolean
+    Boolean,
+    /// URL
+    Url,
+}
+
+impl From<FieldType> for RustFieldType {
+    fn from(ft: FieldType) -> Self {
+        match ft {
+            FieldType::String => RustFieldType::String,
+            FieldType::Email => RustFieldType::Email,
+            FieldType::Phone => RustFieldType::Phone,
+            FieldType::Date => RustFieldType::Date,
+            FieldType::Integer => RustFieldType::Integer,
+            FieldType::Float => RustFieldType::Float,
+            FieldType::Boolean => RustFieldType::Boolean,
+            FieldType::Url => RustFieldType::Url,
+        }
+    }
+}
+
+impl From<RustFieldType> for FieldType {
+    fn from(ft: RustFieldType) -> Self {
+        match ft {
+            RustFieldType::String => FieldType::String,
+            RustFieldType::Email => FieldType::Email,
+            RustFieldType::Phone => FieldType::Phone,
+            RustFieldType::Date => FieldType::Date,
+            RustFieldType::Integer => FieldType::Integer,
+            RustFieldType::Float => FieldType::Float,
+            RustFieldType::Boolean => FieldType::Boolean,
+            RustFieldType::Url => FieldType::Url,
+        }
+    }
+}
+
+#[pymethods]
+impl FieldType {
+    fn __repr__(&self) -> &'static str {
+        match self {
+            FieldType::String => "FieldType.STRING",
+            FieldType::Email => "FieldType.EMAIL",
+            FieldType::Phone => "FieldType.PHONE",
+            FieldType::Date => "FieldType.DATE",
+            FieldType::Integer => "FieldType.INTEGER",
+            FieldType::Float => "FieldType.FLOAT",
+            FieldType::Boolean => "FieldType.BOOLEAN",
+            FieldType::Url => "FieldType.URL",
+        }
+    }
+}
+
+/// Schema for structured data extraction
+#[pyclass]
+#[derive(Clone)]
+pub struct Schema {
+    inner: RustSchema,
+}
+
+#[pymethods]
+impl Schema {
+    /// Create a new schema
+    #[new]
+    fn new(name: &str) -> Self {
+        Schema {
+            inner: RustSchema::new(name),
+        }
+    }
+
+    /// Add a description
+    fn with_description(&mut self, description: &str) {
+        self.inner.description = Some(description.to_string());
+    }
+
+    /// Add a required field
+    fn field(&mut self, name: &str, field_type: FieldType) {
+        self.inner.fields.push(RustFieldDefinition::new(name, field_type.into()));
+    }
+
+    /// Add an optional field
+    fn optional_field(&mut self, name: &str, field_type: FieldType) {
+        self.inner.fields.push(RustFieldDefinition::optional(name, field_type.into()));
+    }
+
+    /// Add an optional field with a default value
+    fn optional_field_with_default(&mut self, name: &str, field_type: FieldType, default: &str) {
+        let field = RustFieldDefinition::optional(name, field_type.into())
+            .with_default(default);
+        self.inner.fields.push(field);
+    }
+
+    /// Get the schema name
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// Get the schema description
+    #[getter]
+    fn description(&self) -> Option<&str> {
+        self.inner.description.as_deref()
+    }
+
+    /// Get the number of fields
+    fn __len__(&self) -> usize {
+        self.inner.fields.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Schema(name='{}', fields={})", self.inner.name, self.inner.fields.len())
+    }
+}
+
+/// Response from storing structured data
+#[pyclass]
+#[derive(Clone)]
+pub struct StructuredResponse {
+    #[pyo3(get)]
+    pub id: i64,
+    #[pyo3(get)]
+    pub schema_name: String,
+    #[pyo3(get)]
+    pub fields: HashMap<String, String>,
+    #[pyo3(get)]
+    pub confidence: f32,
+    #[pyo3(get)]
+    pub is_valid: bool,
+    #[pyo3(get)]
+    pub missing_fields: Vec<String>,
+    #[pyo3(get)]
+    pub latency_ms: f64,
+}
+
+impl From<RustStructuredResponse> for StructuredResponse {
+    fn from(r: RustStructuredResponse) -> Self {
+        StructuredResponse {
+            id: r.id,
+            schema_name: r.schema_name,
+            fields: r.extracted_data.fields.clone(),
+            confidence: r.extracted_data.confidence,
+            is_valid: r.validation.is_valid,
+            missing_fields: r.extracted_data.missing_fields.clone(),
+            latency_ms: r.latency_ms,
+        }
+    }
+}
+
+#[pymethods]
+impl StructuredResponse {
+    /// Get an extracted field value
+    fn get_field(&self, name: &str) -> Option<String> {
+        self.fields.get(name).cloned()
+    }
+
+    /// Check if extraction was complete (all required fields present)
+    fn is_complete(&self) -> bool {
+        self.missing_fields.is_empty()
+    }
+
+    /// Get agent-friendly string representation
+    fn to_agent_string(&self) -> String {
+        if self.is_valid {
+            let fields: Vec<String> = self.fields
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            format!(
+                "Stored {} (confidence: {:.0}%): {}",
+                self.schema_name,
+                self.confidence * 100.0,
+                fields.join(", ")
+            )
+        } else {
+            format!(
+                "Partial {} stored with missing fields: {}",
+                self.schema_name,
+                self.missing_fields.join(", ")
+            )
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StructuredResponse(id={}, schema='{}', confidence={:.2})",
+            self.id, self.schema_name, self.confidence
+        )
+    }
+}
+
+/// A stored structured data item
+#[pyclass]
+#[derive(Clone)]
+pub struct StructuredDataItem {
+    #[pyo3(get)]
+    pub id: i64,
+    #[pyo3(get)]
+    pub knowledge_id: i64,
+    #[pyo3(get)]
+    pub schema_name: String,
+    #[pyo3(get)]
+    pub fields: HashMap<String, String>,
+    #[pyo3(get)]
+    pub confidence: f32,
+}
+
+impl From<RustStructuredDataItem> for StructuredDataItem {
+    fn from(item: RustStructuredDataItem) -> Self {
+        let fields = item.fields().unwrap_or_default();
+        StructuredDataItem {
+            id: item.id,
+            knowledge_id: item.knowledge_id,
+            schema_name: item.schema_name,
+            fields,
+            confidence: item.confidence,
+        }
+    }
+}
+
+#[pymethods]
+impl StructuredDataItem {
+    /// Get a specific field value
+    fn get_field(&self, name: &str) -> Option<String> {
+        self.fields.get(name).cloned()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StructuredDataItem(id={}, schema='{}')",
+            self.id, self.schema_name
+        )
+    }
+}
+
+// ============================================================================
+// AGENT ENGINE
+// ============================================================================
+
 /// Semantic state engine for AI agents
 ///
 /// Provides a unified API where agents express intent naturally,
@@ -446,6 +714,7 @@ impl AgentEngine {
 
     /// Create a mock engine for testing (no model download required)
     #[staticmethod]
+    #[pyo3(signature = (db_path=None))]
     fn mock(db_path: Option<String>) -> PyResult<Self> {
         let path = db_path.as_deref().unwrap_or(":memory:");
         let engine = RustEngine::new_mock(path).map_err(to_py_err)?;
@@ -571,6 +840,66 @@ impl AgentEngine {
     /// Reset metrics
     fn reset_metrics(&self) {
         self.engine.reset_metrics()
+    }
+
+    // =========================================================================
+    // STRUCTURED DATA METHODS
+    // =========================================================================
+
+    /// Register a schema for structured data extraction
+    fn register_schema(&mut self, schema: Schema) -> PyResult<()> {
+        self.engine.register_schema(schema.inner).map_err(to_py_err)
+    }
+
+    /// Get a registered schema by name
+    fn get_schema(&self, name: &str) -> Option<Schema> {
+        self.engine.get_schema(name).map(|s| Schema { inner: s.clone() })
+    }
+
+    /// List all registered schema names
+    fn list_schemas(&self) -> Vec<String> {
+        self.engine.list_schemas().into_iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Unregister a schema
+    fn unregister_schema(&mut self, name: &str) -> PyResult<bool> {
+        self.engine.unregister_schema(name).map_err(to_py_err)
+    }
+
+    /// Store content with structured data extraction
+    ///
+    /// Extracts fields from natural language based on the specified schema.
+    fn store_structured(&mut self, content: &str, schema_name: &str) -> PyResult<StructuredResponse> {
+        let response = self.engine.store_structured(content, schema_name).map_err(to_py_err)?;
+        Ok(response.into())
+    }
+
+    /// Query structured data by schema
+    ///
+    /// Args:
+    ///     schema_name: Name of the schema to query
+    ///     field_filter: Optional tuple of (field_name, field_value) to filter by
+    #[pyo3(signature = (schema_name, field_filter=None))]
+    fn query_structured(&self, schema_name: &str, field_filter: Option<(String, String)>) -> PyResult<Vec<StructuredDataItem>> {
+        let filter = field_filter.as_ref().map(|(f, v)| (f.as_str(), v.as_str()));
+        let items = self.engine.query_structured(schema_name, filter).map_err(to_py_err)?;
+        Ok(items.into_iter().map(|i| i.into()).collect())
+    }
+
+    /// Get structured data for a specific knowledge item
+    fn get_structured(&self, knowledge_id: i64) -> PyResult<Option<StructuredDataItem>> {
+        let item = self.engine.get_structured(knowledge_id).map_err(to_py_err)?;
+        Ok(item.map(|i| i.into()))
+    }
+
+    /// Count structured data items by schema
+    fn count_structured(&self, schema_name: &str) -> PyResult<usize> {
+        self.engine.count_structured(schema_name).map_err(to_py_err)
+    }
+
+    /// Load schemas from database (call on startup to restore persisted schemas)
+    fn load_schemas_from_db(&mut self) -> PyResult<usize> {
+        self.engine.load_schemas_from_db().map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {
