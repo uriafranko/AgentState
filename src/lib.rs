@@ -187,6 +187,29 @@ impl AgentEngine {
         Ok(Self { brain, storage, metrics })
     }
 
+    /// Creates an AgentEngine in mock mode for testing
+    ///
+    /// Uses hash-based deterministic embeddings instead of the ML model.
+    /// This allows testing all functionality without requiring the actual model files.
+    pub fn new_mock(db_path: &str) -> Result<Self> {
+        let brain = Brain::new_mock().context("Failed to initialize mock Brain")?;
+        let storage = Storage::new(db_path).context("Failed to initialize Storage")?;
+        let metrics = Metrics::new();
+        Ok(Self { brain, storage, metrics })
+    }
+
+    /// Creates an in-memory AgentEngine in mock mode for testing
+    ///
+    /// Combines in-memory database with mock embeddings for fast, isolated testing.
+    pub fn new_mock_in_memory() -> Result<Self> {
+        Self::new_mock(":memory:")
+    }
+
+    /// Returns whether this engine is running in mock mode
+    pub fn is_mock(&self) -> bool {
+        self.brain.is_mock()
+    }
+
     // =========================================================================
     // METRICS API
     // =========================================================================

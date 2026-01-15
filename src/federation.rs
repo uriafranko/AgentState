@@ -63,6 +63,8 @@ pub struct FederatedEngine {
     shards: Arc<RwLock<HashMap<String, AgentEngine>>>,
     /// Order of shard access for LRU eviction
     access_order: Arc<RwLock<Vec<String>>>,
+    /// Whether to use mock mode for shards (testing without ML model)
+    mock_mode: bool,
 }
 
 impl FederatedEngine {
@@ -78,6 +80,7 @@ impl FederatedEngine {
             config,
             shards: Arc::new(RwLock::new(HashMap::new())),
             access_order: Arc::new(RwLock::new(Vec::new())),
+            mock_mode: false,
         })
     }
 
@@ -92,7 +95,31 @@ impl FederatedEngine {
             config,
             shards: Arc::new(RwLock::new(HashMap::new())),
             access_order: Arc::new(RwLock::new(Vec::new())),
+            mock_mode: false,
         })
+    }
+
+    /// Creates a federated engine in mock mode for testing
+    ///
+    /// Uses hash-based deterministic embeddings instead of the ML model.
+    /// This allows testing federation without requiring model files.
+    pub fn new_mock_in_memory() -> Result<Self> {
+        let config = FederationConfig {
+            base_path: PathBuf::from(":memory:"),
+            max_open_shards: 100,
+            auto_create_shards: true,
+        };
+        Ok(Self {
+            config,
+            shards: Arc::new(RwLock::new(HashMap::new())),
+            access_order: Arc::new(RwLock::new(Vec::new())),
+            mock_mode: true,
+        })
+    }
+
+    /// Returns whether this federation is running in mock mode
+    pub fn is_mock(&self) -> bool {
+        self.mock_mode
     }
 
     /// Gets the database path for a shard
@@ -129,10 +156,15 @@ impl FederatedEngine {
         // Evict oldest shard if at capacity
         self.maybe_evict_shard()?;
 
-        // Create new shard
+        // Create new shard (use mock mode if federation is in mock mode)
         let path = self.shard_path(shard_id);
-        let engine = AgentEngine::new(path.to_string_lossy().as_ref())
-            .with_context(|| format!("Failed to create shard: {}", shard_id))?;
+        let engine = if self.mock_mode {
+            AgentEngine::new_mock(path.to_string_lossy().as_ref())
+                .with_context(|| format!("Failed to create mock shard: {}", shard_id))?
+        } else {
+            AgentEngine::new(path.to_string_lossy().as_ref())
+                .with_context(|| format!("Failed to create shard: {}", shard_id))?
+        };
 
         // Insert shard
         {
