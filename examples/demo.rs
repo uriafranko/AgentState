@@ -261,11 +261,8 @@ fn process_and_print(engine: &mut AgentEngine, input: &str) {
     match engine.process(input) {
         Ok(response) => {
             if let AgentResponse::Stored { data_type, latency_ms, .. } = &response {
-                let type_str = match data_type {
-                    DataType::Task => "TASK  ",
-                    DataType::Memory => "MEMORY",
-                };
-                println!("  [{}] \"{}\" ({:.1}ms)", type_str, input, latency_ms);
+                let type_str = data_type.as_category().to_uppercase();
+                println!("  [{:10}] \"{}\" ({:.1}ms)", type_str, input, latency_ms);
             }
         }
         Err(e) => println!("  [ERROR] \"{}\": {}", input, e),

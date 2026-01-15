@@ -17,9 +17,13 @@ const EMBEDDING_CACHE_SIZE: usize = 1000;
 
 /// The Brain handles all AI-related operations including embedding generation and intent classification
 pub struct Brain {
-    model: BertModel,
-    tokenizer: Tokenizer,
+    /// Model for real mode (None in mock mode)
+    model: Option<BertModel>,
+    /// Tokenizer for real mode (None in mock mode)
+    tokenizer: Option<Tokenizer>,
     device: Device,
+    /// Whether running in mock mode (hash-based embeddings for testing)
+    mock_mode: bool,
     /// Anchor vector representing "Task" data type
     anchor_task: Tensor,
     /// Anchor vector representing "Memory" data type
@@ -184,6 +188,67 @@ impl Brain {
         Self::new_from_huggingface()
     }
 
+    /// Creates a new Brain in mock mode for testing
+    ///
+    /// Uses hash-based deterministic embeddings instead of the ML model.
+    /// This allows running all the same logic (storage, retrieval, classification)
+    /// without requiring the actual model files.
+    ///
+    /// The mock embeddings are semantically-aware based on keyword detection,
+    /// providing reasonable classification behavior for testing.
+    pub fn new_mock() -> Result<Self> {
+        let device = Device::Cpu;
+
+        // Create placeholder tensors for anchors
+        let placeholder = Tensor::zeros((1, 384), DType::F32, &device)?;
+
+        let mut brain = Self {
+            model: None,
+            tokenizer: None,
+            device,
+            mock_mode: true,
+            anchor_task: placeholder.clone(),
+            anchor_memory: placeholder.clone(),
+            anchor_preference: placeholder.clone(),
+            anchor_relationship: placeholder.clone(),
+            anchor_event: placeholder.clone(),
+            anchor_store: placeholder.clone(),
+            anchor_query: placeholder,
+            embedding_cache: HashMap::new(),
+            cache_order: VecDeque::new(),
+        };
+
+        // Initialize anchor vectors using mock embeddings
+        brain.anchor_task = brain.embed(
+            "action item, todo, remind me to, deadline, schedule, need to do, task, must complete",
+        )?;
+        brain.anchor_memory = brain.embed(
+            "fact, information, context, background, remember that, note, detail about, knowledge",
+        )?;
+        brain.anchor_preference = brain.embed(
+            "I prefer, I like, my favorite, I enjoy, I want, preference, likes, dislikes, choose",
+        )?;
+        brain.anchor_relationship = brain.embed(
+            "is my, works at, knows, colleague, friend, family, partner, relationship, connected to",
+        )?;
+        brain.anchor_event = brain.embed(
+            "meeting, appointment, event, happening, tomorrow, next week, on date, scheduled for, calendar",
+        )?;
+        brain.anchor_store = brain.embed(
+            "save this, remember, store, add, note that, record, keep track of, my name is, I like",
+        )?;
+        brain.anchor_query = brain.embed(
+            "what is, who is, find, search, look up, tell me about, retrieve, get, show me, list",
+        )?;
+
+        Ok(brain)
+    }
+
+    /// Returns whether this Brain is running in mock mode
+    pub fn is_mock(&self) -> bool {
+        self.mock_mode
+    }
+
     /// Creates a new Brain instance from local model files
     ///
     /// Expects the directory to contain: config.json, tokenizer.json, model.safetensors
@@ -263,9 +328,10 @@ impl Brain {
         let placeholder = Tensor::zeros((1, 384), DType::F32, &device)?;
 
         let mut brain = Self {
-            model,
-            tokenizer,
+            model: Some(model),
+            tokenizer: Some(tokenizer),
             device,
+            mock_mode: false,
             anchor_task: placeholder.clone(),
             anchor_memory: placeholder.clone(),
             anchor_preference: placeholder.clone(),
@@ -337,9 +403,14 @@ impl Brain {
 
     /// Internal: compute embedding without caching (used by embed())
     fn compute_embedding(&self, text: &str) -> Result<Tensor> {
+        if self.mock_mode {
+            return self.compute_mock_embedding(text);
+        }
+
         // Tokenize input text
-        let tokens = self
-            .tokenizer
+        let tokenizer = self.tokenizer.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Tokenizer not available"))?;
+        let tokens = tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
@@ -352,8 +423,9 @@ impl Brain {
         let token_type_ids_tensor = Tensor::new(token_type_ids.as_slice(), &self.device)?.unsqueeze(0)?;
 
         // Run model inference
-        let embeddings = self
-            .model
+        let model = self.model.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Model not available"))?;
+        let embeddings = model
             .forward(&token_ids_tensor, &token_type_ids_tensor, None)
             .context("Model forward pass failed")?;
 
@@ -380,6 +452,115 @@ impl Brain {
         let normalized = mean_embeddings.broadcast_div(&norm)?;
 
         Ok(normalized)
+    }
+
+    /// Compute mock embedding using semantic-aware hash-based approach
+    ///
+    /// Creates deterministic 384-dimensional vectors that preserve semantic
+    /// properties needed for classification and similarity search.
+    fn compute_mock_embedding(&self, text: &str) -> Result<Tensor> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let text_lower = text.to_lowercase();
+        let mut embedding = vec![0.0f32; 384];
+
+        // Base hash for random-like distribution
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let base_hash = hasher.finish();
+
+        // Fill with pseudo-random values based on text hash
+        for i in 0..384 {
+            let mut h = DefaultHasher::new();
+            (base_hash, i).hash(&mut h);
+            let val = h.finish();
+            embedding[i] = ((val % 10000) as f32 / 10000.0) * 2.0 - 1.0;
+        }
+
+        // Semantic boosting: adjust specific dimensions based on keywords
+        // This makes similar texts have similar embeddings
+        // Use strong boosting (1.5) to create clear semantic clusters for mock mode
+
+        // Task-related keywords (boost dimensions 0-50)
+        let task_keywords = ["remind", "todo", "task", "need to", "schedule", "deadline", "call", "buy", "complete", "don't forget", "pick up", "book", "renew"];
+        let task_score: f32 = task_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 1.5;
+        for i in 0..50 {
+            embedding[i] += task_score;
+        }
+
+        // Memory/fact keywords (boost dimensions 50-100)
+        let memory_keywords = ["is", "name", "number", "fact", "information", "capital", "phone", "password", "email", "birthday", "founded", "runs on", "api", "key", "deadline"];
+        let memory_score: f32 = memory_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 1.5;
+        for i in 50..100 {
+            embedding[i] += memory_score;
+        }
+
+        // Preference keywords (boost dimensions 100-150)
+        let pref_keywords = ["prefer", "favorite", "like", "enjoy", "love", "hate", "want", "dark mode", "early", "video call"];
+        let pref_score: f32 = pref_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 1.5;
+        for i in 100..150 {
+            embedding[i] += pref_score;
+        }
+
+        // Relationship keywords (boost dimensions 150-200)
+        let rel_keywords = ["colleague", "friend", "family", "works at", "knows", "is my", "partner", "team lead", "manager", "mentor", "cto", "department"];
+        let rel_score: f32 = rel_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 1.5;
+        for i in 150..200 {
+            embedding[i] += rel_score;
+        }
+
+        // Event keywords (boost dimensions 200-250)
+        let event_keywords = ["meeting", "appointment", "event", "tomorrow", "next week", "calendar", "party", "every monday", "all-hands", "review", "launch", "holiday"];
+        let event_score: f32 = event_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 1.5;
+        for i in 200..250 {
+            embedding[i] += event_score;
+        }
+
+        // Query keywords (boost dimensions 250-300) - strong boost for clear queries
+        let query_keywords = ["what", "who", "where", "when", "how", "find", "search", "show", "list", "?", "tell me", "about"];
+        let query_score: f32 = query_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 2.0;  // Extra strong for queries
+        for i in 250..300 {
+            embedding[i] += query_score;
+        }
+
+        // Store keywords (boost dimensions 300-350) - declarative statements default to store
+        let store_keywords = ["remember", "save", "store", "add", "note", "record", "my name is", "i am", "my", "i prefer", "i like", "'s"];
+        let store_score: f32 = store_keywords.iter()
+            .filter(|kw| text_lower.contains(*kw))
+            .count() as f32 * 2.0;  // Extra strong for stores
+        for i in 300..350 {
+            embedding[i] += store_score;
+        }
+
+        // Additional heuristic: statements without query markers default to store
+        let has_query_marker = query_keywords.iter().any(|kw| text_lower.contains(*kw));
+        if !has_query_marker && text_lower.len() > 10 {
+            // Boost store dimensions for declarative statements
+            for i in 300..350 {
+                embedding[i] += 1.0;
+            }
+        }
+
+        // L2 normalize
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+        for v in &mut embedding {
+            *v /= norm;
+        }
+
+        Ok(Tensor::new(&embedding[..], &self.device)?.unsqueeze(0)?)
     }
 
     /// Returns cache statistics (hits can be inferred by caller)
